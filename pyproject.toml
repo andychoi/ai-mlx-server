@@ -1,0 +1,17 @@
+[project]
+name = "ai-mlx-server"
+version = "0.1.0"
+description = "MLX inference server for Apple Silicon — OpenAI-compatible API with embeddings and LoRA support"
+requires-python = ">=3.11"
+dependencies = [
+    "mlx-lm>=0.22",
+    "mlx-embeddings>=0.2",
+]
+
+[project.optional-dependencies]
+vlm = ["mlx-vlm>=0.2"]
+lora = ["datasets", "mlx-lm[lora]"]
+dev = ["pytest", "httpx"]
+
+[project.scripts]
+ai-mlx-server = "server:main"

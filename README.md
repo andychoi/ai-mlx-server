@@ -22,6 +22,33 @@ Extracted from [ai-docs](https://github.com/andychoi/ai-docs) for standalone use
 - **Bearer-token auth** — `--api-key KEY` or `MLX_API_KEY` env var
 - **LoRA adapters** — `--adapter-path path/to/adapter`
 
+## Install
+
+### pip (recommended)
+```bash
+pip install git+https://github.com/andychoi/ai-mlx-server.git
+```
+
+### macOS native service (launchd)
+
+Run `ai-mlx-server` automatically at login, with restart-on-crash:
+
+```bash
+# Install via pip first, then:
+bash packaging/install-service.sh
+
+# Start the service
+launchctl load ~/Library/LaunchAgents/com.andychoi.ai-mlx-server.plist
+
+# Stop the service
+launchctl unload ~/Library/LaunchAgents/com.andychoi.ai-mlx-server.plist
+
+# View logs
+tail -f ~/Library/Logs/ai-mlx-server.log
+```
+
+Edit `~/.config/ai-mlx-server/models.yaml` to configure which models to preload at startup.
+
 ## Quick Start
 
 ```bash

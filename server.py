@@ -449,13 +449,19 @@ class MLXAPIHandler(APIHandler):
         ram_used_gb = round(vm.used / 1e9, 2)
         ram_available_gb = round(vm.available / 1e9, 2)
 
-        # Try to read queue depth from ResponseGenerator
-        q = getattr(getattr(MLXAPIHandler, '_response_generator', None), '_queue', None)
-        if q is not None:
-            queue_depth = q.qsize()
-        else:
-            log.debug("queue_depth unavailable: _response_generator has no _queue attribute")
-            queue_depth = 0
+        # Per-model queue depths using the correct ResponseGenerator.requests attribute.
+        with _workers_lock:
+            workers_snapshot = dict(_model_workers)
+        queue_depths = {
+            mid: w.requests.qsize()
+            for mid, w in workers_snapshot.items()
+        }
+        # Include the default generator if no per-model workers exist yet.
+        if not queue_depths:
+            default_rg = getattr(MLXAPIHandler, '_response_generator', None)
+            default_q = getattr(default_rg, 'requests', None)
+            if default_q is not None:
+                queue_depths["_default"] = default_q.qsize()
 
         self._json_response(200, {
             "status": "ok",
@@ -464,7 +470,7 @@ class MLXAPIHandler(APIHandler):
             "resident_models": _model_cache.stats(),
             "ram_used_gb": ram_used_gb,
             "ram_available_gb": ram_available_gb,
-            "queue_depth": queue_depth,
+            "queue_depths": queue_depths,
         })
 
     def _handle_metrics(self):
@@ -475,10 +481,16 @@ class MLXAPIHandler(APIHandler):
         # Update gauges from current cache state
         resident_models.set(len(_model_cache))
         resident_bytes.set(_model_cache.total_bytes())
-        # Update queue gauge
-        q = getattr(getattr(MLXAPIHandler, '_response_generator', None), '_queue', None)
-        if q is not None:
-            _queue_depth_gauge.set(q.qsize())
+        # Sum queue depths across all per-model workers.
+        with _workers_lock:
+            workers_snapshot = dict(_model_workers)
+        total_queued = sum(w.requests.qsize() for w in workers_snapshot.values())
+        if not workers_snapshot:
+            default_rg = getattr(MLXAPIHandler, '_response_generator', None)
+            default_q = getattr(default_rg, 'requests', None)
+            if default_q is not None:
+                total_queued += default_q.qsize()
+        _queue_depth_gauge.set(total_queued)
         body = generate_latest()
         self.send_response(200)
         self.send_header("Content-Type", CONTENT_TYPE_LATEST)

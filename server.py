@@ -791,6 +791,8 @@ def main():
                         help="Require auth for /metrics (default: /metrics is public)")
 
     args = parser.parse_args()
+    global _server_args
+    _server_args = args
     logging.getLogger().setLevel(getattr(logging, args.log_level))
 
     # Configure the unified model cache with eviction limits
@@ -799,6 +801,7 @@ def main():
     _model_cache = ModelCache(
         max_models=args.max_resident_models,
         max_bytes=max_bytes,
+        on_evict=_tear_down_worker,
     )
 
     model_provider = ModelProvider(args)
@@ -851,6 +854,9 @@ def main():
             _model_cache.put(model_id, model_provider_tmp, est_bytes=est, pinned=True, role="chat")
             _loaded_model_names.add(model_id)
             log.info("Preloaded chat model %s in %.1fs", model_id, time.time() - t0)
+            # Create the per-model worker eagerly so requests route immediately.
+            _get_or_create_worker(model_id)
+            log.info("Worker ready for %s", model_id)
         except Exception as e:
             log.error("Failed to preload chat model %s: %s", model_id, e)
 
@@ -889,6 +895,14 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         log.info("Shutting down…")
+        # Tear down all per-model workers first.
+        with _workers_lock:
+            worker_snapshot = dict(_model_workers)
+        for mid, w in worker_snapshot.items():
+            log.info("Stopping worker for %s", mid)
+            w.stop_and_join()
+        with _workers_lock:
+            _model_workers.clear()
         response_generator.stop_and_join()
         server.server_close()
 

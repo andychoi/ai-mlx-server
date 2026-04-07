@@ -97,6 +97,19 @@ class TestModelCacheLRU(unittest.TestCase):
         cache.put("m3", "v3")   # triggers eviction of m1
         self.assertEqual(evicted, ["m0", "m1"])
 
+    def test_on_evict_callback_can_access_cache(self):
+        """Callback must not deadlock when it reads from the same cache."""
+        accessed = []
+
+        def callback(key):
+            # Simulate _tear_down_worker calling cache.get() or stats()
+            accessed.append(cache.stats())  # would deadlock if lock is held
+
+        cache = ModelCache(max_models=1, on_evict=callback)
+        cache.put("m0", "v0")
+        cache.put("m1", "v1")  # evicts m0 → callback fires → calls cache.stats()
+        self.assertEqual(len(accessed), 1)  # callback was called
+
 
 if __name__ == "__main__":
     unittest.main()

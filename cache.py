@@ -66,10 +66,22 @@ class ModelCache:
                 "role": role,
                 "id": key,
             }
-            self._evict_if_needed()
+            evicted_keys = self._evict_if_needed()
+        # Call eviction callbacks outside the lock to avoid deadlock.
+        # The callback (e.g. _tear_down_worker) may block on stop_and_join().
+        if self._on_evict is not None:
+            for evicted_key in evicted_keys:
+                try:
+                    self._on_evict(evicted_key)
+                except Exception as cb_err:
+                    log.warning("on_evict callback raised: %s", cb_err)
 
-    def _evict_if_needed(self):
-        """Evict LRU unpinned entries until within limits. Lock must be held."""
+    def _evict_if_needed(self) -> list[str]:
+        """Evict LRU unpinned entries until within limits. Lock must be held.
+
+        Returns list of evicted keys so callers can notify outside the lock.
+        """
+        evicted: list[str] = []
         while True:
             evictable = [(k, v) for k, v in self._cache.items() if not v["pinned"]]
 
@@ -93,12 +105,6 @@ class ModelCache:
             oldest_key = evictable[0][0]
             entry = self._cache.pop(oldest_key)
             log.info("Evicting model %s (est %.1f GB)", oldest_key, entry["est_bytes"] / 1e9)
-            # Notify caller before releasing the model reference
-            if self._on_evict is not None:
-                try:
-                    self._on_evict(oldest_key)
-                except Exception as cb_err:
-                    log.warning("on_evict callback raised: %s", cb_err)
             # Release reference so Python GC can collect the model
             del entry["value"]
             # Clear Metal cache to actually free VRAM
@@ -107,6 +113,8 @@ class ModelCache:
                 mx.metal.clear_cache()
             except Exception:
                 pass
+            evicted.append(oldest_key)
+        return evicted
 
     def stats(self) -> list[dict]:
         """Return list of dicts for each resident model (for /health)."""

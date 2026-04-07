@@ -17,12 +17,16 @@ import io
 import json
 import logging
 import os
+import re
 import threading
+import time
 from datetime import datetime, timezone
 from functools import partial
 from http.server import HTTPServer
 
 from mlx_lm.server import APIHandler, ModelProvider, LRUPromptCache, ResponseGenerator
+
+from cache import ModelCache, estimate_model_bytes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("mlx-server")
@@ -37,9 +41,12 @@ try:
 except Exception:
     pass
 
-# ── Embedding model cache (loaded once per model path) ──────────────────────
-_embed_cache: dict[str, tuple] = {}
+# ── Unified model cache ──────────────────────────────────────────────────────
+_model_cache = ModelCache()
+# Lock for the actual embedding model load (cache lock is only for dict ops)
 _embed_lock = threading.Lock()
+# Track all loaded model names for /api/tags
+_loaded_model_names: set[str] = set()
 
 
 def _load_embed_model(model_path: str):
@@ -66,12 +73,38 @@ def _load_embed_model(model_path: str):
 
 def _get_embed_model(model_path: str):
     """Return cached (model, tokenizer) for the given embedding model."""
+    cached = _model_cache.get(model_path)
+    if cached is not None:
+        return cached
     with _embed_lock:
-        if model_path not in _embed_cache:
-            log.info("Loading embedding model: %s", model_path)
-            model, tokenizer = _load_embed_model(model_path)
-            _embed_cache[model_path] = (model, tokenizer)
-        return _embed_cache[model_path]
+        # Double-check after acquiring lock
+        cached = _model_cache.get(model_path)
+        if cached is not None:
+            return cached
+        log.info("Loading embedding model: %s", model_path)
+        model, tokenizer = _load_embed_model(model_path)
+        est = estimate_model_bytes(model_path)
+        _model_cache.put(model_path, (model, tokenizer), est_bytes=est, role="embedding")
+        _loaded_model_names.add(model_path)
+        return (model, tokenizer)
+
+
+def _parse_models_config(path: str) -> list[dict]:
+    """Parse a simple models.yaml. No pyyaml required."""
+    models = []
+    current: dict = {}
+    with open(path) as f:
+        for line in f:
+            line = line.rstrip()
+            if re.match(r'\s*-\s+id:', line):
+                if current:
+                    models.append(current)
+                current = {"id": re.sub(r'\s*-\s+id:\s*', '', line).strip()}
+            elif re.match(r'\s+role:', line):
+                current["role"] = line.split(":", 1)[1].strip()
+    if current:
+        models.append(current)
+    return models
 
 
 # ── Ollama adapter ───────────────────────────────────────────────────────────
@@ -244,14 +277,18 @@ class MLXAPIHandler(APIHandler):
             self._json_response(200, {"version": _SERVER_VERSION})
             return
         if self.path == "/api/tags":
-            models = []
+            names = set(_loaded_model_names)
             if self._default_model:
-                models.append({
-                    "name": self._default_model,
+                names.add(self._default_model)
+            models = [
+                {
+                    "name": name,
                     "modified_at": _now_iso(),
                     "size": 0,
                     "details": {},
-                })
+                }
+                for name in sorted(names)
+            ]
             self._json_response(200, {"models": models})
             return
         self.send_response(404)
@@ -471,9 +508,29 @@ def main():
     parser.add_argument("--prompt-cache-size", type=int, default=None)
     parser.add_argument("--prompt-cache-bytes", type=int, default=None)
     parser.add_argument("--pipeline", action="store_true")
+    # Phase 2.1: multi-model preload
+    parser.add_argument("--preload", action="append", metavar="MODEL",
+                        help="Chat model to preload at startup (can be specified multiple times)")
+    parser.add_argument("--preload-embedding", action="append", metavar="MODEL",
+                        help="Embedding model to preload at startup (can be specified multiple times)")
+    parser.add_argument("--models-config", type=str, default=None, metavar="PATH",
+                        help="Path to YAML config file listing models to preload")
+    # Phase 2.2: LRU eviction limits
+    parser.add_argument("--max-resident-models", type=int, default=None, metavar="N",
+                        help="Maximum number of models to keep in memory")
+    parser.add_argument("--max-resident-gb", type=float, default=None, metavar="N",
+                        help="Maximum total model memory in GB before eviction")
 
     args = parser.parse_args()
     logging.getLogger().setLevel(getattr(logging, args.log_level))
+
+    # Configure the unified model cache with eviction limits
+    global _model_cache
+    max_bytes = int(args.max_resident_gb * 1e9) if args.max_resident_gb is not None else None
+    _model_cache = ModelCache(
+        max_models=args.max_resident_models,
+        max_bytes=max_bytes,
+    )
 
     model_provider = ModelProvider(args)
     prompt_cache = LRUPromptCache(args.prompt_cache_size or 1)
@@ -481,6 +538,57 @@ def main():
 
     # Inject the default model name into the handler class so /api/tags can report it.
     MLXAPIHandler._default_model = args.model or ""
+
+    # Phase 2.1: collect all models to preload from CLI args and config file
+    preload_chat: list[str] = list(args.preload or [])
+    preload_embed: list[str] = list(args.preload_embedding or [])
+
+    if args.models_config:
+        try:
+            config_models = _parse_models_config(args.models_config)
+            for entry in config_models:
+                model_id = entry.get("id", "")
+                role = entry.get("role", "chat")
+                if not model_id:
+                    continue
+                if role == "embedding":
+                    preload_embed.append(model_id)
+                else:
+                    preload_chat.append(model_id)
+        except Exception as e:
+            log.error("Failed to parse models config %s: %s", args.models_config, e)
+
+    # Preload chat models sequentially
+    for model_id in preload_chat:
+        log.info("Preloading chat model: %s", model_id)
+        t0 = time.time()
+        try:
+            # Force model load via ModelProvider by temporarily swapping args.model
+            orig_model = args.model
+            args.model = model_id
+            model_provider_tmp = ModelProvider(args)
+            model_provider_tmp.load()
+            args.model = orig_model
+            est = estimate_model_bytes(model_id)
+            _model_cache.put(model_id, model_provider_tmp, est_bytes=est, pinned=True, role="chat")
+            _loaded_model_names.add(model_id)
+            log.info("Preloaded chat model %s in %.1fs", model_id, time.time() - t0)
+        except Exception as e:
+            log.error("Failed to preload chat model %s: %s", model_id, e)
+
+    # Preload embedding models sequentially
+    for model_id in preload_embed:
+        log.info("Preloading embedding model: %s", model_id)
+        t0 = time.time()
+        try:
+            _get_embed_model(model_id)
+            # Mark as pinned in cache
+            entry = _model_cache._cache.get(model_id)
+            if entry:
+                entry["pinned"] = True
+            log.info("Preloaded embedding model %s in %.1fs", model_id, time.time() - t0)
+        except Exception as e:
+            log.error("Failed to preload embedding model %s: %s", model_id, e)
 
     handler = partial(
         MLXAPIHandler,

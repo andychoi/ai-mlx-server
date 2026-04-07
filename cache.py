@@ -116,6 +116,17 @@ class ModelCache:
             evicted.append(oldest_key)
         return evicted
 
+    def pin(self, key: str) -> bool:
+        """Mark a cached entry as pinned (exempt from eviction).
+
+        Returns True if the entry was found and pinned, False if not cached.
+        """
+        with self._lock:
+            if key in self._cache:
+                self._cache[key]["pinned"] = True
+                return True
+            return False
+
     def stats(self) -> list[dict]:
         """Return list of dicts for each resident model (for /health)."""
         with self._lock:

@@ -878,10 +878,7 @@ def main():
         t0 = time.time()
         try:
             _get_embed_model(model_id)
-            # Mark as pinned in cache
-            entry = _model_cache._cache.get(model_id)
-            if entry:
-                entry["pinned"] = True
+            _model_cache.pin(model_id)
             log.info("Preloaded embedding model %s in %.1fs", model_id, time.time() - t0)
         except Exception as e:
             log.error("Failed to preload embedding model %s: %s", model_id, e)

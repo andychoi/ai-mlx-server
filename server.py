@@ -31,6 +31,16 @@ from cache import ModelCache, estimate_model_bytes
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("mlx-server")
 
+# ── Server start time (for uptime reporting) ─────────────────────────────────
+_server_start_time = time.time()
+
+# ── Optional Prometheus metrics ──────────────────────────────────────────────
+try:
+    from metrics import requests_total, request_duration_seconds, resident_models, resident_bytes, queue_depth as _queue_depth_gauge
+    _metrics_enabled = True
+except ImportError:
+    _metrics_enabled = False
+
 # ── Version (read once at import time) ──────────────────────────────────────
 _SERVER_VERSION = "0.1.0"
 try:
@@ -268,10 +278,15 @@ class MLXAPIHandler(APIHandler):
 
     # Loaded model name is injected by main() after handler construction.
     _default_model: str = ""
+    # ResponseGenerator is injected by main() so /health and /metrics can read queue depth.
+    _response_generator = None
 
     def do_GET(self):
         if self.path == "/health":
-            self._json_response(200, {"status": "ok"})
+            self._handle_health()
+            return
+        if self.path == "/metrics":
+            self._handle_metrics()
             return
         if self.path == "/api/version":
             self._json_response(200, {"version": _SERVER_VERSION})
@@ -313,6 +328,48 @@ class MLXAPIHandler(APIHandler):
         super().do_POST()
 
     # ── helpers ─────────────────────────────────────────────────────────────
+
+    def _handle_health(self):
+        import psutil
+        vm = psutil.virtual_memory()
+        ram_used_gb = round(vm.used / 1e9, 2)
+        ram_available_gb = round(vm.available / 1e9, 2)
+
+        # Try to read queue depth from ResponseGenerator
+        q = getattr(getattr(MLXAPIHandler, '_response_generator', None), '_queue', None)
+        if q is not None:
+            queue_depth = q.qsize()
+        else:
+            log.debug("queue_depth unavailable: _response_generator has no _queue attribute")
+            queue_depth = 0
+
+        self._json_response(200, {
+            "status": "ok",
+            "version": _SERVER_VERSION,
+            "uptime_seconds": int(time.time() - _server_start_time),
+            "resident_models": _model_cache.stats(),
+            "ram_used_gb": ram_used_gb,
+            "ram_available_gb": ram_available_gb,
+            "queue_depth": queue_depth,
+        })
+
+    def _handle_metrics(self):
+        if not _metrics_enabled:
+            self._json_response(503, {"error": "prometheus_client not installed. pip install ai-mlx-server[metrics]"})
+            return
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        # Update gauges from current cache state
+        resident_models.set(len(_model_cache))
+        resident_bytes.set(_model_cache.total_bytes())
+        # Update queue gauge
+        q = getattr(getattr(MLXAPIHandler, '_response_generator', None), '_queue', None)
+        if q is not None:
+            _queue_depth_gauge.set(q.qsize())
+        body = generate_latest()
+        self.send_response(200)
+        self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+        self.end_headers()
+        self.wfile.write(body)
 
     def _json_response(self, status: int, body: dict):
         self.send_response(status)
@@ -536,8 +593,9 @@ def main():
     prompt_cache = LRUPromptCache(args.prompt_cache_size or 1)
     response_generator = ResponseGenerator(model_provider, prompt_cache)
 
-    # Inject the default model name into the handler class so /api/tags can report it.
+    # Inject the default model name and response generator into the handler class.
     MLXAPIHandler._default_model = args.model or ""
+    MLXAPIHandler._response_generator = response_generator
 
     # Phase 2.1: collect all models to preload from CLI args and config file
     preload_chat: list[str] = list(args.preload or [])

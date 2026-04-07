@@ -6,11 +6,13 @@ requires-python = ">=3.11"
 dependencies = [
     "mlx-lm>=0.22",
     "mlx-embeddings>=0.2",
+    "psutil",
 ]
 
 [project.optional-dependencies]
 vlm = ["mlx-vlm>=0.2"]
 lora = ["datasets", "mlx-lm[lora]"]
+metrics = ["prometheus_client"]
 dev = ["pytest", "httpx"]
 
 [project.scripts]

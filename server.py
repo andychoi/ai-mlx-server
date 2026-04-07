@@ -13,10 +13,12 @@ Docker containers reach it via:
     OLLAMA_URL=http://host.docker.internal:8085
 """
 
+import io
 import json
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from functools import partial
 from http.server import HTTPServer
 
@@ -24,6 +26,16 @@ from mlx_lm.server import APIHandler, ModelProvider, LRUPromptCache, ResponseGen
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("mlx-server")
+
+# ── Version (read once at import time) ──────────────────────────────────────
+_SERVER_VERSION = "0.1.0"
+try:
+    import tomllib  # Python 3.11+
+    _toml_path = os.path.join(os.path.dirname(__file__), "pyproject.toml")
+    with open(_toml_path, "rb") as _f:
+        _SERVER_VERSION = tomllib.load(_f)["project"]["version"]
+except Exception:
+    pass
 
 # ── Embedding model cache (loaded once per model path) ──────────────────────
 _embed_cache: dict[str, tuple] = {}
@@ -62,17 +74,185 @@ def _get_embed_model(model_path: str):
         return _embed_cache[model_path]
 
 
+# ── Ollama adapter ───────────────────────────────────────────────────────────
+
+def _now_iso() -> str:
+    """Return current UTC time in ISO-8601 format (Ollama style)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class OllamaAdapter:
+    """Translates between Ollama API format and OpenAI API format."""
+
+    @staticmethod
+    def translate_request(ollama_body: dict, *, wrap_prompt: bool = False) -> dict:
+        """Convert an Ollama request body to an OpenAI-compatible body.
+
+        Args:
+            ollama_body: The parsed Ollama request dict.
+            wrap_prompt: If True, treat ``ollama_body["prompt"]`` as a user
+                         message (for /api/generate).  If False, pass
+                         ``messages`` through as-is (for /api/chat).
+        """
+        openai_body: dict = {}
+
+        # model
+        if "model" in ollama_body:
+            openai_body["model"] = ollama_body["model"]
+
+        # messages
+        if wrap_prompt:
+            prompt = ollama_body.get("prompt", "")
+            openai_body["messages"] = [{"role": "user", "content": prompt}]
+        else:
+            if "messages" in ollama_body:
+                openai_body["messages"] = ollama_body["messages"]
+
+        # stream — Ollama defaults to True, OpenAI defaults to False
+        openai_body["stream"] = ollama_body.get("stream", True)
+
+        # options mapping
+        options = ollama_body.get("options", {})
+        if "num_predict" in options:
+            openai_body["max_tokens"] = options["num_predict"]
+        if "temperature" in options:
+            openai_body["temperature"] = options["temperature"]
+        if "top_p" in options:
+            openai_body["top_p"] = options["top_p"]
+        if "top_k" in options:
+            openai_body["top_k"] = options["top_k"]
+        if "stop" in options:
+            openai_body["stop"] = options["stop"]
+
+        # pass through stop at top level too
+        if "stop" in ollama_body and "stop" not in openai_body:
+            openai_body["stop"] = ollama_body["stop"]
+
+        return openai_body
+
+    @staticmethod
+    def openai_response_to_ollama(openai_resp: dict, model: str) -> dict:
+        """Convert a non-streaming OpenAI response dict to Ollama format."""
+        content = ""
+        finish_reason = "stop"
+        if openai_resp.get("choices"):
+            choice = openai_resp["choices"][0]
+            msg = choice.get("message", {})
+            content = msg.get("content", "")
+            finish_reason = choice.get("finish_reason", "stop") or "stop"
+
+        return {
+            "model": model,
+            "created_at": _now_iso(),
+            "message": {"role": "assistant", "content": content},
+            "done": True,
+            "done_reason": finish_reason,
+        }
+
+    @staticmethod
+    def openai_sse_chunk_to_ollama(sse_data: str, model: str) -> dict | None:
+        """Parse one SSE data payload and return an Ollama NDJSON chunk dict.
+
+        Returns None if the chunk should be skipped (e.g. ``[DONE]``).
+        """
+        sse_data = sse_data.strip()
+        if sse_data == "[DONE]":
+            return None
+        try:
+            chunk = json.loads(sse_data)
+        except json.JSONDecodeError:
+            return None
+
+        content = ""
+        finish_reason = None
+        if chunk.get("choices"):
+            choice = chunk["choices"][0]
+            delta = choice.get("delta", {})
+            content = delta.get("content", "") or ""
+            finish_reason = choice.get("finish_reason")
+
+        done = finish_reason is not None
+        ollama_chunk: dict = {
+            "model": model,
+            "created_at": _now_iso(),
+            "message": {"role": "assistant", "content": content},
+            "done": done,
+        }
+        if done:
+            ollama_chunk["done_reason"] = finish_reason or "stop"
+        return ollama_chunk
+
+
+# ── Streaming wfile wrapper ──────────────────────────────────────────────────
+
+class _StreamTranslatorWfile:
+    """Wraps self.wfile and translates SSE lines to Ollama NDJSON on-the-fly.
+
+    The parent handler writes SSE lines like:
+        data: {...}\n\n
+        data: [DONE]\n\n
+
+    This wrapper intercepts each write, parses SSE data lines, converts them
+    to Ollama NDJSON, and writes them to the real wfile.
+    """
+
+    def __init__(self, real_wfile, model: str):
+        self._real = real_wfile
+        self._model = model
+        self._buf = b""
+
+    def write(self, data: bytes) -> int:
+        self._buf += data
+        self._flush_lines()
+        return len(data)
+
+    def _flush_lines(self):
+        while b"\n" in self._buf:
+            line, self._buf = self._buf.split(b"\n", 1)
+            line_str = line.decode("utf-8", errors="replace").rstrip("\r")
+            if line_str.startswith("data: "):
+                payload = line_str[len("data: "):]
+                ollama_chunk = OllamaAdapter.openai_sse_chunk_to_ollama(
+                    payload, self._model
+                )
+                if ollama_chunk is not None:
+                    self._real.write(
+                        (json.dumps(ollama_chunk) + "\n").encode("utf-8")
+                    )
+            # Other SSE lines (comments like ": keepalive ...") are silently dropped.
+
+    def flush(self):
+        self._real.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 # ── Extended API handler ────────────────────────────────────────────────────
 
 class MLXAPIHandler(APIHandler):
-    """APIHandler with /v1/embeddings and /health endpoints."""
+    """APIHandler with /v1/embeddings, /health, and Ollama-compatible endpoints."""
+
+    # Loaded model name is injected by main() after handler construction.
+    _default_model: str = ""
 
     def do_GET(self):
         if self.path == "/health":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "ok"}).encode())
+            self._json_response(200, {"status": "ok"})
+            return
+        if self.path == "/api/version":
+            self._json_response(200, {"version": _SERVER_VERSION})
+            return
+        if self.path == "/api/tags":
+            models = []
+            if self._default_model:
+                models.append({
+                    "name": self._default_model,
+                    "modified_at": _now_iso(),
+                    "size": 0,
+                    "details": {},
+                })
+            self._json_response(200, {"models": models})
             return
         self.send_response(404)
         self.end_headers()
@@ -83,8 +263,124 @@ class MLXAPIHandler(APIHandler):
         if self.path == "/v1/embeddings":
             self._handle_embeddings()
             return
-        # Delegate chat/completions to parent
+        if self.path == "/api/embeddings":
+            self._handle_ollama_embeddings()
+            return
+        if self.path == "/api/generate":
+            self._handle_ollama_chat(wrap_prompt=True)
+            return
+        if self.path == "/api/chat":
+            self._handle_ollama_chat(wrap_prompt=False)
+            return
+        # Delegate chat/completions (and /v1/completions) to parent
         super().do_POST()
+
+    # ── helpers ─────────────────────────────────────────────────────────────
+
+    def _json_response(self, status: int, body: dict):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+
+    def _read_body(self) -> bytes:
+        content_length = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(content_length)
+
+    # ── Ollama route handlers ────────────────────────────────────────────────
+
+    def _handle_ollama_embeddings(self):
+        """Handle POST /api/embeddings — Ollama uses 'prompt' instead of 'input'."""
+        try:
+            raw = self._read_body()
+            body = json.loads(raw.decode())
+
+            # Ollama uses "prompt" for the text; remap to "input"
+            if "prompt" in body and "input" not in body:
+                body["input"] = body.pop("prompt")
+
+            # Re-encode and inject into rfile so _handle_embeddings can read it
+            remapped = json.dumps(body).encode()
+            self.headers["Content-Length"] = str(len(remapped))
+            self.rfile = io.BytesIO(remapped)
+            self._handle_embeddings()
+        except Exception as e:
+            log.error("Ollama embeddings failed: %s", e)
+            self._json_response(500, {"error": str(e)})
+
+    def _handle_ollama_chat(self, *, wrap_prompt: bool):
+        """Handle POST /api/generate or /api/chat.
+
+        Translates the Ollama request to OpenAI format, forwards to the parent
+        handler, and translates the response back to Ollama format.
+
+        For streaming responses: wraps self.wfile with _StreamTranslatorWfile
+        so SSE output is converted to NDJSON on-the-fly.
+
+        For non-streaming responses: buffers the OpenAI response, then converts
+        and writes the Ollama JSON to the real wfile.
+        """
+        try:
+            raw = self._read_body()
+            ollama_body = json.loads(raw.decode())
+        except Exception as e:
+            log.error("Failed to parse Ollama request: %s", e)
+            self._json_response(400, {"error": f"Invalid JSON: {e}"})
+            return
+
+        model = ollama_body.get("model", self._default_model)
+        openai_body = OllamaAdapter.translate_request(ollama_body, wrap_prompt=wrap_prompt)
+        is_streaming = openai_body.get("stream", True)
+
+        # Prepare to call parent's do_POST with remapped path + body
+        encoded_body = json.dumps(openai_body).encode()
+        original_path = self.path
+        original_rfile = self.rfile
+        original_wfile = self.wfile
+
+        self.path = "/v1/chat/completions"
+        self.headers["Content-Length"] = str(len(encoded_body))
+        self.rfile = io.BytesIO(encoded_body)
+
+        try:
+            if is_streaming:
+                # Intercept wfile to translate SSE → NDJSON
+                self.wfile = _StreamTranslatorWfile(original_wfile, model)
+                super().do_POST()
+                # Flush any remaining buffered bytes
+                self.wfile.flush()
+            else:
+                # Buffer the entire OpenAI response, then translate
+                buf = io.BytesIO()
+                self.wfile = buf
+                super().do_POST()
+
+                buf.seek(0)
+                raw_response = buf.read()
+
+                # The parent sends HTTP headers + body into self.wfile together.
+                # We need to split headers from body. Look for the blank line.
+                if b"\r\n\r\n" in raw_response:
+                    _headers_part, body_part = raw_response.split(b"\r\n\r\n", 1)
+                else:
+                    body_part = raw_response
+
+                try:
+                    openai_resp = json.loads(body_part.decode())
+                    ollama_resp = OllamaAdapter.openai_response_to_ollama(openai_resp, model)
+                    self.wfile = original_wfile
+                    self._json_response(200, ollama_resp)
+                except Exception as e:
+                    log.error("Response translation failed: %s", e)
+                    # Fallback: write the raw OpenAI response
+                    self.wfile = original_wfile
+                    original_wfile.write(raw_response)
+        finally:
+            self.path = original_path
+            self.rfile = original_rfile
+            self.wfile = original_wfile
+
+    # ── /v1/embeddings ───────────────────────────────────────────────────────
 
     def _handle_embeddings(self):
         try:
@@ -96,17 +392,11 @@ class MLXAPIHandler(APIHandler):
             input_text = body.get("input", "")
 
             if not model_path:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "model is required"}).encode())
+                self._json_response(400, {"error": "model is required"})
                 return
 
             if not input_text:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"error": "input is required"}).encode())
+                self._json_response(400, {"error": "input is required"})
                 return
 
             model, tokenizer = _get_embed_model(model_path)
@@ -124,18 +414,11 @@ class MLXAPIHandler(APIHandler):
                 "model": model_path,
                 "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
             }
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode())
+            self._json_response(200, response)
 
         except Exception as e:
             log.error("Embedding failed: %s", e)
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": str(e)}).encode())
+            self._json_response(500, {"error": str(e)})
 
 
 def main():
@@ -179,6 +462,9 @@ def main():
     prompt_cache = LRUPromptCache(args.prompt_cache_size or 1)
     response_generator = ResponseGenerator(model_provider, prompt_cache)
 
+    # Inject the default model name into the handler class so /api/tags can report it.
+    MLXAPIHandler._default_model = args.model or ""
+
     handler = partial(
         MLXAPIHandler,
         response_generator,
@@ -191,7 +477,10 @@ def main():
         log.info("Default model: %s", args.model)
     if args.adapter_path:
         log.info("LoRA adapter: %s", args.adapter_path)
-    log.info("Endpoints: /v1/chat/completions, /v1/embeddings, /health")
+    log.info(
+        "Endpoints: /v1/chat/completions, /v1/embeddings, /health, "
+        "/api/generate, /api/chat, /api/embeddings, /api/tags, /api/version"
+    )
 
     try:
         server.serve_forever()

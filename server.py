@@ -122,8 +122,7 @@ def _get_or_create_worker(model_id: str) -> "ResponseGenerator":
     args_copy = copy.copy(base)
     args_copy.model = model_id
     mp = ModelProvider(args_copy)
-    cache_size = getattr(_server_args, "prompt_cache_size", None) or 1
-    pc = LRUPromptCache(cache_size)
+    pc = LRUPromptCache(getattr(args_copy, "prompt_cache_size", None) or 1)
     worker = ResponseGenerator(mp, pc)
 
     with _workers_lock:

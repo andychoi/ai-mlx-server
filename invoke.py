@@ -14,11 +14,13 @@ import os
 import re
 import threading
 
+from cache import ModelCache
+
 _log = logging.getLogger(__name__)
 
-# Module-level caches — models loaded once per process.
-_mlx_model_cache: dict[str, tuple] = {}
-_mlx_embed_cache: dict[str, tuple] = {}
+# Module-level LRU caches — models loaded once per process.
+_mlx_model_cache: ModelCache = ModelCache()
+_mlx_embed_cache: ModelCache = ModelCache()
 
 # Serialize all MLX GPU access — Metal command buffers are not thread-safe.
 _mlx_lock = threading.Lock()
@@ -59,14 +61,14 @@ def embed(model_path: str, text: str) -> list[float]:
         )
 
     with _mlx_lock:
-        global _mlx_embed_cache
-        if model_path not in _mlx_embed_cache:
+        cached = _mlx_embed_cache.get(model_path)
+        if cached is None:
             model, tokenizer = _load_hf_offline_first(
                 _mlx_embed_load, model_path, "mlx-embeddings"
             )
-            _mlx_embed_cache[model_path] = (model, tokenizer)
-
-        model, tokenizer = _mlx_embed_cache[model_path]
+            _mlx_embed_cache.put(model_path, (model, tokenizer), role="embedding")
+            cached = (model, tokenizer)
+        model, tokenizer = cached
 
         try:
             input_ids = tokenizer.encode(text, return_tensors="mlx")
@@ -114,18 +116,18 @@ def invoke(
             "  pip install mlx-vlm     # vision-language models"
         )
 
-    global _mlx_model_cache
-
     with _mlx_lock:
         try:
             if _mlx_lm_available:
-                if model_path not in _mlx_model_cache:
+                cached_lm = _mlx_model_cache.get(model_path)
+                if cached_lm is None:
                     model, tokenizer = _load_hf_offline_first(
                         _lm_load, model_path, "mlx-lm"
                     )
-                    _mlx_model_cache[model_path] = (model, tokenizer, "lm")
+                    _mlx_model_cache.put(model_path, (model, tokenizer, "lm"), role="chat")
+                    cached_lm = (model, tokenizer, "lm")
 
-                model, tokenizer, _ = _mlx_model_cache[model_path]
+                model, tokenizer, _ = cached_lm
 
                 if hasattr(tokenizer, "apply_chat_template"):
                     messages = [{"role": "user", "content": prompt}]
@@ -145,14 +147,16 @@ def invoke(
                                       max_tokens=max_tokens, verbose=False)
 
             else:  # mlx_vlm
-                if model_path not in _mlx_model_cache:
+                cached_vlm = _mlx_model_cache.get(model_path)
+                if cached_vlm is None:
                     model, processor = _load_hf_offline_first(
                         _vlm_load, model_path, "mlx-vlm"
                     )
                     cfg = _load_vlm_config(model_path)
-                    _mlx_model_cache[model_path] = (model, processor, cfg)
+                    _mlx_model_cache.put(model_path, (model, processor, cfg), role="chat")
+                    cached_vlm = (model, processor, cfg)
 
-                model, processor, mlx_cfg = _mlx_model_cache[model_path]
+                model, processor, mlx_cfg = cached_vlm
                 formatted = _apply_chat_template(processor, mlx_cfg, prompt, num_images=0)
 
                 kwargs: dict = {"max_tokens": max_tokens, "verbose": False}

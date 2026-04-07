@@ -86,6 +86,17 @@ class TestModelCacheLRU(unittest.TestCase):
         self.assertEqual(len(cache), 1)
         self.assertEqual(cache.get("m1"), "new")
 
+    def test_on_evict_callback_fires(self):
+        """on_evict is called with the evicted key when LRU eviction occurs."""
+        evicted = []
+        cache = ModelCache(max_models=2, on_evict=evicted.append)
+        cache.put("m0", "v0")
+        cache.put("m1", "v1")
+        cache.put("m2", "v2")   # triggers eviction of m0
+        self.assertEqual(evicted, ["m0"])
+        cache.put("m3", "v3")   # triggers eviction of m1
+        self.assertEqual(evicted, ["m0", "m1"])
+
 
 if __name__ == "__main__":
     unittest.main()

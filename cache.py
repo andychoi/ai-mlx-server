@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +26,11 @@ class ModelCache:
         self,
         max_models: int | None = None,
         max_bytes: int | None = None,
+        on_evict: Callable[[str], None] | None = None,
     ):
         self._max_models = max_models
         self._max_bytes = max_bytes
+        self._on_evict = on_evict
         self._cache: OrderedDict[str, dict] = OrderedDict()
         self._lock = threading.Lock()
 
@@ -90,6 +93,12 @@ class ModelCache:
             oldest_key = evictable[0][0]
             entry = self._cache.pop(oldest_key)
             log.info("Evicting model %s (est %.1f GB)", oldest_key, entry["est_bytes"] / 1e9)
+            # Notify caller before releasing the model reference
+            if self._on_evict is not None:
+                try:
+                    self._on_evict(oldest_key)
+                except Exception as cb_err:
+                    log.warning("on_evict callback raised: %s", cb_err)
             # Release reference so Python GC can collect the model
             del entry["value"]
             # Clear Metal cache to actually free VRAM

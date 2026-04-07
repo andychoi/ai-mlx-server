@@ -389,28 +389,45 @@ class MLXAPIHandler(APIHandler):
             body = json.loads(raw.decode())
 
             model_path = body.get("model", "")
-            input_text = body.get("input", "")
+            input_value = body.get("input", "")
 
             if not model_path:
                 self._json_response(400, {"error": "model is required"})
                 return
 
-            if not input_text:
+            # Normalise to a list; reject empty input
+            if isinstance(input_value, list):
+                texts = input_value
+            else:
+                texts = [input_value]
+
+            if not texts or not any(texts):
                 self._json_response(400, {"error": "input is required"})
                 return
 
             model, tokenizer = _get_embed_model(model_path)
 
-            with _embed_lock:
-                input_ids = tokenizer.encode(input_text, return_tensors="mlx")
-                outputs = model(input_ids)
-                embedding = outputs.text_embeds[0].tolist()
+            data = []
+            prompt_tokens = 0
 
-            prompt_tokens = len(input_text) // 4
+            with _embed_lock:
+                for i, text in enumerate(texts):
+                    input_ids = tokenizer.encode(text, return_tensors="mlx")
+                    outputs = model(input_ids)
+                    embedding = outputs.text_embeds[0].tolist()
+                    # Determine token count from the encoded result.
+                    # With return_tensors="mlx" the result is 2-D (1, seq_len);
+                    # fall back to the raw list length for plain list returns.
+                    try:
+                        token_count = input_ids.shape[-1]
+                    except AttributeError:
+                        token_count = len(input_ids)
+                    prompt_tokens += token_count
+                    data.append({"object": "embedding", "embedding": embedding, "index": i})
 
             response = {
                 "object": "list",
-                "data": [{"object": "embedding", "embedding": embedding, "index": 0}],
+                "data": data,
                 "model": model_path,
                 "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
             }

@@ -427,11 +427,17 @@ class MLXAPIHandler(APIHandler):
             self._handle_ollama_chat(wrap_prompt=False)
             return
         if self.path == "/v1/chat/completions":
-            # Peek at body for thinking params
+            # Peek at body for thinking params and model routing (single read).
             body = self._peek_body()
             if body and ("thinking_budget" in body or "enable_thinking" in body):
                 self._handle_thinking_completion(body)
                 return
+            # Route to per-model worker when _server_args is available.
+            if _server_args is not None and body:
+                model_id = body.get("model") or self._default_model
+                if model_id:
+                    self._dispatch_to_worker(model_id)
+                    return
         # Delegate chat/completions (and /v1/completions) to parent
         super().do_POST()
 
@@ -498,6 +504,16 @@ class MLXAPIHandler(APIHandler):
             return json.loads(raw.decode())
         except Exception:
             return None
+
+    def _dispatch_to_worker(self, model_id: str) -> None:
+        """Swap self.response_generator to the per-model worker and call parent do_POST."""
+        worker = _get_or_create_worker(model_id)
+        original_rg = self.response_generator
+        self.response_generator = worker
+        try:
+            super().do_POST()
+        finally:
+            self.response_generator = original_rg
 
     # thinking_budget / enable_thinking — Option B implementation:
     # Route through invoke.invoke() directly when these params are present.
@@ -623,14 +639,20 @@ class MLXAPIHandler(APIHandler):
             if is_streaming:
                 # Intercept wfile to translate SSE → NDJSON
                 self.wfile = _StreamTranslatorWfile(original_wfile, model)
-                super().do_POST()
+                if _server_args is not None and model:
+                    self._dispatch_to_worker(model)
+                else:
+                    super().do_POST()
                 # Flush any remaining buffered bytes
                 self.wfile.flush()
             else:
                 # Buffer the entire OpenAI response, then translate
                 buf = io.BytesIO()
                 self.wfile = buf
-                super().do_POST()
+                if _server_args is not None and model:
+                    self._dispatch_to_worker(model)
+                else:
+                    super().do_POST()
 
                 buf.seek(0)
                 raw_response = buf.read()

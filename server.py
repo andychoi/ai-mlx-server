@@ -124,6 +124,24 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _messages_to_prompt(messages: list[dict]) -> str:
+    """Convert a list of OpenAI messages to a single prompt string for invoke()."""
+    if not messages:
+        return ""
+    parts = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            # multimodal content — extract text parts only
+            content = " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        parts.append(f"{role}: {content}")
+    return "\n".join(parts)
+
+
 class OllamaAdapter:
     """Translates between Ollama API format and OpenAI API format."""
 
@@ -324,6 +342,12 @@ class MLXAPIHandler(APIHandler):
         if self.path == "/api/chat":
             self._handle_ollama_chat(wrap_prompt=False)
             return
+        if self.path == "/v1/chat/completions":
+            # Peek at body for thinking params
+            body = self._peek_body()
+            if body and ("thinking_budget" in body or "enable_thinking" in body):
+                self._handle_thinking_completion(body)
+                return
         # Delegate chat/completions (and /v1/completions) to parent
         super().do_POST()
 
@@ -381,6 +405,70 @@ class MLXAPIHandler(APIHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         return self.rfile.read(content_length)
 
+    def _peek_body(self) -> dict | None:
+        """Read the request body and replace self.rfile so parent can re-read it."""
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(content_length)
+            self.rfile = io.BytesIO(raw)  # restore for parent
+            return json.loads(raw.decode())
+        except Exception:
+            return None
+
+    # thinking_budget / enable_thinking — Option B implementation:
+    # Route through invoke.invoke() directly when these params are present.
+    # This bypasses mlx_lm's ResponseGenerator, losing streaming and tool-calling,
+    # which is acceptable for deep reasoning calls that don't stream.
+    # Option A (intercepting the chat-template call) would require patching mlx_lm internals.
+
+    def _handle_thinking_completion(self, body: dict):
+        """Handle /v1/chat/completions when thinking_budget or enable_thinking is present.
+
+        Routes through invoke.invoke() directly (non-streaming, no tool-calling).
+        Returns an OpenAI-compatible response.
+        """
+        from invoke import invoke as mlx_invoke
+
+        model_path = body.get("model", self._default_model)
+        messages = body.get("messages", [])
+        max_tokens = body.get("max_tokens", 4096)
+        thinking_budget = body.get("thinking_budget", 0)
+        enable_thinking = body.get("enable_thinking", True)
+
+        # Convert messages to a single prompt string
+        prompt = _messages_to_prompt(messages)
+
+        try:
+            text, tok_in, tok_out = mlx_invoke(
+                model_path,
+                prompt,
+                max_tokens=max_tokens,
+                thinking_budget=thinking_budget,
+                enable_thinking=enable_thinking,
+            )
+        except Exception as e:
+            log.error("invoke failed: %s", e)
+            self._json_response(500, {"error": str(e)})
+            return
+
+        response = {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model_path,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": tok_in,
+                "completion_tokens": tok_out,
+                "total_tokens": tok_in + tok_out,
+            },
+        }
+        self._json_response(200, response)
+
     # ── Ollama route handlers ────────────────────────────────────────────────
 
     def _handle_ollama_embeddings(self):
@@ -424,6 +512,17 @@ class MLXAPIHandler(APIHandler):
 
         model = ollama_body.get("model", self._default_model)
         openai_body = OllamaAdapter.translate_request(ollama_body, wrap_prompt=wrap_prompt)
+
+        # Propagate thinking params if present in the Ollama request
+        for key in ("thinking_budget", "enable_thinking"):
+            if key in ollama_body:
+                openai_body[key] = ollama_body[key]
+
+        # If thinking params are present, route through invoke directly
+        if "thinking_budget" in openai_body or "enable_thinking" in openai_body:
+            self._handle_thinking_completion(openai_body)
+            return
+
         is_streaming = openai_body.get("stream", True)
 
         # Prepare to call parent's do_POST with remapped path + body

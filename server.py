@@ -298,8 +298,39 @@ class MLXAPIHandler(APIHandler):
     _default_model: str = ""
     # ResponseGenerator is injected by main() so /health and /metrics can read queue depth.
     _response_generator = None
+    # Auth config — injected by main()
+    _api_key: str = ""
+    _auth_health: bool = False
+    _auth_metrics: bool = False
+
+    def _check_auth(self, path: str) -> bool:
+        """Return True if the request is authorized, False otherwise.
+
+        If no API key is configured, always returns True.
+        /health and /metrics are exempt unless --auth-health/--auth-metrics is set.
+        Uses constant-time comparison to prevent timing attacks.
+        """
+        import hmac
+        if not self._api_key:
+            return True
+
+        # Check exemptions
+        if path == "/health" and not self._auth_health:
+            return True
+        if path == "/metrics" and not self._auth_metrics:
+            return True
+
+        auth_header = self.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return False
+
+        provided_key = auth_header[len("Bearer "):]
+        return hmac.compare_digest(provided_key, self._api_key)
 
     def do_GET(self):
+        if not self._check_auth(self.path):
+            self._json_response(401, {"error": "Unauthorized"})
+            return
         if self.path == "/health":
             self._handle_health()
             return
@@ -329,6 +360,9 @@ class MLXAPIHandler(APIHandler):
         self.wfile.write(b"Not Found")
 
     def do_POST(self):
+        if not self._check_auth(self.path):
+            self._json_response(401, {"error": "Unauthorized"})
+            return
         log.info("POST %s", self.path)
         if self.path == "/v1/embeddings":
             self._handle_embeddings()
@@ -676,6 +710,13 @@ def main():
                         help="Maximum number of models to keep in memory")
     parser.add_argument("--max-resident-gb", type=float, default=None, metavar="N",
                         help="Maximum total model memory in GB before eviction")
+    # Phase 5.1: bearer-token authentication
+    parser.add_argument("--api-key", type=str, default=None, metavar="KEY",
+                        help="API key for bearer-token auth (fallback: MLX_API_KEY env var)")
+    parser.add_argument("--auth-health", action="store_true",
+                        help="Require auth for /health (default: /health is public)")
+    parser.add_argument("--auth-metrics", action="store_true",
+                        help="Require auth for /metrics (default: /metrics is public)")
 
     args = parser.parse_args()
     logging.getLogger().setLevel(getattr(logging, args.log_level))
@@ -695,6 +736,14 @@ def main():
     # Inject the default model name and response generator into the handler class.
     MLXAPIHandler._default_model = args.model or ""
     MLXAPIHandler._response_generator = response_generator
+
+    # Phase 5.1: inject auth config
+    api_key = args.api_key or os.environ.get("MLX_API_KEY", "")
+    MLXAPIHandler._api_key = api_key
+    MLXAPIHandler._auth_health = args.auth_health
+    MLXAPIHandler._auth_metrics = args.auth_metrics
+    if api_key:
+        log.info("API key authentication enabled")
 
     # Phase 2.1: collect all models to preload from CLI args and config file
     preload_chat: list[str] = list(args.preload or [])

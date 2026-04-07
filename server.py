@@ -58,6 +58,12 @@ _embed_lock = threading.Lock()
 # Track all loaded model names for /api/tags
 _loaded_model_names: set[str] = set()
 
+# ── Per-model ResponseGenerator worker registry ─────────────────────────────
+_model_workers: dict[str, "ResponseGenerator"] = {}
+_workers_lock = threading.Lock()
+# Set by main() so _get_or_create_worker can build ModelProvider instances.
+_server_args = None
+
 
 def _load_embed_model(model_path: str):
     """Load an embedding model, trying offline cache first."""
@@ -97,6 +103,51 @@ def _get_embed_model(model_path: str):
         _model_cache.put(model_path, (model, tokenizer), est_bytes=est, role="embedding")
         _loaded_model_names.add(model_path)
         return (model, tokenizer)
+
+
+def _get_or_create_worker(model_id: str) -> "ResponseGenerator":
+    """Return the per-model ResponseGenerator, creating it lazily if needed.
+
+    Thread-safe: concurrent calls for the same model create only one worker.
+    Uses _server_args to build ModelProvider; must be called after main() sets it.
+    """
+    with _workers_lock:
+        if model_id in _model_workers:
+            return _model_workers[model_id]
+
+    # Build outside lock to avoid holding it during potentially slow setup.
+    import copy
+    import argparse
+    base = _server_args if _server_args is not None else argparse.Namespace()
+    args_copy = copy.copy(base)
+    args_copy.model = model_id
+    mp = ModelProvider(args_copy)
+    cache_size = getattr(_server_args, "prompt_cache_size", None) or 1
+    pc = LRUPromptCache(cache_size)
+    worker = ResponseGenerator(mp, pc)
+
+    with _workers_lock:
+        # Re-check: another thread may have created one while we were building.
+        if model_id not in _model_workers:
+            _model_workers[model_id] = worker
+        else:
+            worker.stop_and_join()
+            worker = _model_workers[model_id]
+
+    return worker
+
+
+def _tear_down_worker(model_id: str) -> None:
+    """Stop and remove the worker for model_id.
+
+    Called by the ModelCache on_evict callback. In-flight and queued requests
+    complete before the worker thread stops.
+    """
+    with _workers_lock:
+        worker = _model_workers.pop(model_id, None)
+    if worker is not None:
+        log.info("Tearing down worker for %s", model_id)
+        worker.stop_and_join()
 
 
 def _parse_models_config(path: str) -> list[dict]:

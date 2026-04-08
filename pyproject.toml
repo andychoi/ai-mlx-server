@@ -5,7 +5,7 @@ description = "MLX inference server for Apple Silicon — OpenAI-compatible API 
 requires-python = ">=3.11"
 dependencies = [
     "mlx-lm>=0.22",
-    "mlx-embeddings>=0.2",
+    "mlx-embeddings>=0.1",
     "psutil",
 ]
 
@@ -14,6 +14,10 @@ vlm = ["mlx-vlm>=0.2"]
 lora = ["datasets", "mlx-lm[lora]"]
 metrics = ["prometheus_client"]
 dev = ["pytest", "httpx"]
+
+[tool.setuptools]
+packages = []
+py-modules = ["server", "cache", "invoke", "metrics"]
 
 [project.scripts]
 ai-mlx-server = "server:main"

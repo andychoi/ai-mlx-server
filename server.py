@@ -87,8 +87,20 @@ def _load_embed_model(model_path: str):
             os.environ["HF_HUB_OFFLINE"] = orig
 
 
+def _resolve_model_path(model_path: str) -> str:
+    """Resolve a bare model tag (no '/') to the mlx-community HuggingFace namespace.
+
+    e.g. 'snowflake-arctic-embed-l-v2.0-4bit' → 'mlx-community/snowflake-arctic-embed-l-v2.0-4bit'
+    Local paths (starting with '/' or '.') and fully-qualified HF ids are returned unchanged.
+    """
+    if model_path and "/" not in model_path and not model_path.startswith("."):
+        return f"mlx-community/{model_path}"
+    return model_path
+
+
 def _get_embed_model(model_path: str):
     """Return cached (model, tokenizer) for the given embedding model."""
+    model_path = _resolve_model_path(model_path)
     cached = _model_cache.get(model_path)
     if cached is not None:
         return cached
@@ -118,9 +130,31 @@ def _get_or_create_worker(model_id: str) -> "ResponseGenerator":
     # Build outside lock to avoid holding it during potentially slow setup.
     import copy
     import argparse
+    import psutil
+
+    # Pre-flight: evict unpinned models if the new model may not fit.
+    est = estimate_model_bytes(model_id)
+    if est > 0:
+        try:
+            vm = psutil.virtual_memory()
+            # Leave a 2 GB buffer for KV cache and OS overhead.
+            headroom = vm.available - 2 * 1024 ** 3
+            if est > headroom:
+                log.warning(
+                    "Model %s needs ~%.1f GB but only ~%.1f GB available — "
+                    "evicting unpinned models first.",
+                    model_id, est / 1e9, vm.available / 1e9,
+                )
+                _model_cache.evict_all_unpinned()
+        except Exception:
+            pass
+
     base = _server_args if _server_args is not None else argparse.Namespace()
     args_copy = copy.copy(base)
     args_copy.model = model_id
+    # mlx_lm ≥0.31.2 reads cli_args.allowed_origins in _set_cors_headers.
+    if not hasattr(args_copy, "allowed_origins"):
+        args_copy.allowed_origins = []
     mp = ModelProvider(args_copy)
     pc = LRUPromptCache(getattr(args_copy, "prompt_cache_size", None) or 1)
     worker = ResponseGenerator(mp, pc)
@@ -239,6 +273,14 @@ class OllamaAdapter:
         if "stop" in ollama_body and "stop" not in openai_body:
             openai_body["stop"] = ollama_body["stop"]
 
+        # thinking control — optional, only forwarded when client sends them
+        if "enable_thinking" in options:
+            openai_body["enable_thinking"] = options["enable_thinking"]
+
+        # chat_template_kwargs — arbitrary extra kwargs for apply_chat_template
+        if "chat_template_kwargs" in ollama_body:
+            openai_body["chat_template_kwargs"] = ollama_body["chat_template_kwargs"]
+
         return openai_body
 
     @staticmethod
@@ -311,10 +353,40 @@ class _StreamTranslatorWfile:
         self._real = real_wfile
         self._model = model
         self._buf = b""
+        self._headers_passed = False  # True once \r\n\r\n separator forwarded
 
     def write(self, data: bytes) -> int:
+        if not self._headers_passed:
+            self._buf += data
+            sep = self._buf.find(b"\r\n\r\n")
+            if sep == -1:
+                # Headers not yet complete — pass through raw so status line
+                # and headers reach the client unchanged.
+                try:
+                    self._real.write(self._buf)
+                except BrokenPipeError:
+                    pass
+                self._buf = b""
+            else:
+                # Forward everything up to and including the separator, then
+                # switch to SSE→NDJSON translation for the body.
+                try:
+                    self._real.write(self._buf[:sep + 4])
+                except BrokenPipeError:
+                    pass
+                self._buf = self._buf[sep + 4:]
+                self._headers_passed = True
+                try:
+                    self._flush_lines()
+                except BrokenPipeError:
+                    pass
+            return len(data)
+
         self._buf += data
-        self._flush_lines()
+        try:
+            self._flush_lines()
+        except BrokenPipeError:
+            pass
         return len(data)
 
     def _flush_lines(self):
@@ -327,10 +399,13 @@ class _StreamTranslatorWfile:
                     payload, self._model
                 )
                 if ollama_chunk is not None:
-                    self._real.write(
-                        (json.dumps(ollama_chunk) + "\n").encode("utf-8")
-                    )
-            # Other SSE lines (comments like ": keepalive ...") are silently dropped.
+                    try:
+                        self._real.write(
+                            (json.dumps(ollama_chunk) + "\n").encode("utf-8")
+                        )
+                    except BrokenPipeError:
+                        return
+            # Other SSE lines (comments, blank lines) are silently dropped.
 
     def flush(self):
         self._real.flush()
@@ -429,6 +504,10 @@ class MLXAPIHandler(APIHandler):
         if self.path == "/v1/chat/completions":
             # Peek at body for thinking params and model routing (single read).
             body = self._peek_body()
+            if body:
+                model_id = body.get("model") or self._default_model
+                if model_id:
+                    log.info("  model=%s", model_id)
             if body and ("thinking_budget" in body or "enable_thinking" in body):
                 self._handle_thinking_completion(body)
                 return
@@ -463,11 +542,27 @@ class MLXAPIHandler(APIHandler):
             if default_q is not None:
                 queue_depths["_default"] = default_q.qsize()
 
+        # Merge cache stats (preloaded/embedding) with lazy-loaded worker models.
+        cache_stats = {m["id"]: m for m in _model_cache.stats()}
+        for mid in workers_snapshot:
+            if mid not in cache_stats:
+                est = estimate_model_bytes(mid)
+                cache_stats[mid] = {
+                    "id": mid,
+                    "role": "chat",
+                    "size_gb": round(est / 1e9, 2),
+                    "loaded_at": None,
+                    "last_used_at": None,
+                    "calls": None,
+                    "pinned": False,
+                }
+        resident_models = list(cache_stats.values())
+
         self._json_response(200, {
             "status": "ok",
             "version": _SERVER_VERSION,
             "uptime_seconds": int(time.time() - _server_start_time),
-            "resident_models": _model_cache.stats(),
+            "resident_models": resident_models,
             "ram_used_gb": ram_used_gb,
             "ram_available_gb": ram_available_gb,
             "queue_depths": queue_depths,
@@ -546,17 +641,16 @@ class MLXAPIHandler(APIHandler):
         max_tokens = body.get("max_tokens", 4096)
         thinking_budget = body.get("thinking_budget", 0)
         enable_thinking = body.get("enable_thinking", True)
-
-        # Convert messages to a single prompt string
-        prompt = _messages_to_prompt(messages)
+        chat_template_kwargs = body.get("chat_template_kwargs") or {}
 
         try:
             text, tok_in, tok_out = mlx_invoke(
                 model_path,
-                prompt,
+                messages,
                 max_tokens=max_tokens,
                 thinking_budget=thinking_budget,
                 enable_thinking=enable_thinking,
+                chat_template_kwargs=chat_template_kwargs,
             )
         except Exception as e:
             log.error("invoke failed: %s", e)
@@ -595,7 +689,7 @@ class MLXAPIHandler(APIHandler):
 
             # Re-encode and inject into rfile so _handle_embeddings can read it
             remapped = json.dumps(body).encode()
-            self.headers["Content-Length"] = str(len(remapped))
+            self.headers.replace_header("Content-Length", str(len(remapped)))
             self.rfile = io.BytesIO(remapped)
             self._handle_embeddings()
         except Exception as e:
@@ -622,16 +716,39 @@ class MLXAPIHandler(APIHandler):
             self._json_response(400, {"error": f"Invalid JSON: {e}"})
             return
 
-        model = ollama_body.get("model", self._default_model)
+        model = _resolve_model_path(ollama_body.get("model") or self._default_model)
+        log.info("  model=%s", model)
         openai_body = OllamaAdapter.translate_request(ollama_body, wrap_prompt=wrap_prompt)
+        # Ensure the resolved model path is used downstream
+        if model:
+            openai_body["model"] = model
 
-        # Propagate thinking params if present in the Ollama request
+        # Propagate thinking params from top-level or nested options{}
         for key in ("thinking_budget", "enable_thinking"):
             if key in ollama_body:
                 openai_body[key] = ollama_body[key]
+            elif key in ollama_body.get("options", {}):
+                openai_body[key] = ollama_body["options"][key]
+        if "chat_template_kwargs" in ollama_body:
+            openai_body["chat_template_kwargs"] = ollama_body["chat_template_kwargs"]
 
-        # If thinking params are present, route through invoke directly
-        if "thinking_budget" in openai_body or "enable_thinking" in openai_body:
+        # /no_think prefix in the system message → disable thinking via chat template
+        # (Qwen3 also honors this as a prompt token; we additionally set enable_thinking=False
+        # so the tokenizer's apply_chat_template produces the right template variant.)
+        for msg in openai_body.get("messages", []):
+            if msg.get("role") == "system":
+                content = msg.get("content", "")
+                if isinstance(content, str) and content.lstrip().startswith("/no_think"):
+                    openai_body.setdefault("enable_thinking", False)
+                break
+
+        # Route through invoke() when any thinking/template-control field is present.
+        # This is optional — requests without these fields take the normal streaming path.
+        if (
+            "thinking_budget" in openai_body
+            or "enable_thinking" in openai_body
+            or "chat_template_kwargs" in openai_body
+        ):
             self._handle_thinking_completion(openai_body)
             return
 
@@ -644,7 +761,7 @@ class MLXAPIHandler(APIHandler):
         original_wfile = self.wfile
 
         self.path = "/v1/chat/completions"
-        self.headers["Content-Length"] = str(len(encoded_body))
+        self.headers.replace_header("Content-Length", str(len(encoded_body)))
         self.rfile = io.BytesIO(encoded_body)
 
         try:
@@ -801,11 +918,20 @@ def main():
                         help="Require auth for /health (default: /health is public)")
     parser.add_argument("--auth-metrics", action="store_true",
                         help="Require auth for /metrics (default: /metrics is public)")
+    parser.add_argument("--allowed-origins", nargs="*", default=[],
+                        help="CORS allowed origins (passed through to mlx_lm)")
+    parser.add_argument("--allow-download", action="store_true",
+                        help="Allow automatic model downloads from HuggingFace (default: offline-only)")
 
     args = parser.parse_args()
     global _server_args
     _server_args = args
     logging.getLogger().setLevel(getattr(logging, args.log_level))
+
+    # Prevent accidental HF downloads unless --allow-download is set.
+    # The embedding loader handles its own offline-first + fallback logic.
+    if not args.allow_download:
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
     # Configure the unified model cache with eviction limits
     global _model_cache

@@ -80,10 +80,11 @@ def embed(model_path: str, text: str) -> list[float]:
 
 def invoke(
     model_path: str,
-    prompt: str,
+    prompt: str | list[dict],
     max_tokens: int = 4096,
     thinking_budget: int = 0,
     enable_thinking: bool = True,
+    chat_template_kwargs: dict | None = None,
 ) -> tuple[str, int, int]:
     """Invoke a local MLX model. Returns (text, tokens_in, tokens_out).
 
@@ -130,10 +131,12 @@ def invoke(
                 model, tokenizer, _ = cached_lm
 
                 if hasattr(tokenizer, "apply_chat_template"):
-                    messages = [{"role": "user", "content": prompt}]
+                    messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": prompt}]
                     tpl_kwargs: dict = {"tokenize": False, "add_generation_prompt": True}
                     if not enable_thinking:
                         tpl_kwargs["enable_thinking"] = False
+                    if chat_template_kwargs:
+                        tpl_kwargs.update(chat_template_kwargs)
                     try:
                         formatted = tokenizer.apply_chat_template(messages, **tpl_kwargs)
                     except TypeError:
@@ -165,7 +168,8 @@ def invoke(
 
                 output = _vlm_generate(model, processor, formatted, **kwargs)
 
-            tok_in = len(prompt) // 4
+            prompt_text = " ".join(m.get("content", "") for m in prompt) if isinstance(prompt, list) else prompt
+            tok_in = len(prompt_text) // 4
             tok_out_raw = len(output) // 4
 
             # Strip <think>…</think> reasoning blocks

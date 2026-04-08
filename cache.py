@@ -116,6 +116,27 @@ class ModelCache:
             evicted.append(oldest_key)
         return evicted
 
+    def evict_all_unpinned(self) -> list[str]:
+        """Evict all unpinned models immediately, regardless of limits."""
+        with self._lock:
+            keys = [k for k, v in self._cache.items() if not v["pinned"]]
+            for k in keys:
+                entry = self._cache.pop(k)
+                log.info("Evicting model %s (pre-flight eviction)", k)
+                del entry["value"]
+        try:
+            import mlx.core as mx
+            mx.metal.clear_cache()
+        except Exception:
+            pass
+        if self._on_evict is not None:
+            for k in keys:
+                try:
+                    self._on_evict(k)
+                except Exception as cb_err:
+                    log.warning("on_evict callback raised: %s", cb_err)
+        return keys
+
     def pin(self, key: str) -> bool:
         """Mark a cached entry as pinned (exempt from eviction).
 

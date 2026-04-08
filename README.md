@@ -53,7 +53,7 @@ Edit `~/.config/ai-mlx-server/models.yaml` to configure which models to preload 
 
 ```bash
 pip install -e .
-python server.py --model mlx-community/gemma-4-27b-it-4bit --port 8085
+python server.py --model mlx-community/gemma-4-27b-it-4bit --port 11435
 ```
 
 ## Endpoints
@@ -91,7 +91,7 @@ Warm pool / eviction:
 
 Network:
   --host HOST               Bind address (default: 0.0.0.0)
-  --port PORT               Port (default: 8085)
+  --port PORT               Port (default: 11435)
 
 Generation defaults:
   --temp FLOAT              Sampling temperature (default: 0.0)
@@ -124,10 +124,10 @@ Point any Ollama-compatible client at this server:
 
 ```bash
 # ai-docs
-OLLAMA_URL=http://localhost:8085 ./scripts/dev.sh --pg
+OLLAMA_URL=http://localhost:11435 ./scripts/dev.sh --pg
 
 # Docker containers
-OLLAMA_URL=http://host.docker.internal:8085
+OLLAMA_URL=http://host.docker.internal:11435
 ```
 
 ## LoRA Fine-Tuning
@@ -141,7 +141,7 @@ python -m mlx_lm.lora --model mlx-community/gemma-4-27b-it-4bit \
 
 # Serve with adapter
 python server.py --model mlx-community/gemma-4-27b-it-4bit \
-  --adapter-path lora/adapters/my-adapter --port 8085
+  --adapter-path lora/adapters/my-adapter --port 11435
 ```
 
 ## In-Process Use

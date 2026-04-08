@@ -41,7 +41,7 @@ cat > "$LAUNCH_AGENTS/$PLIST_NAME.plist" <<EOF
         <string>--models-config</string>
         <string>$CONFIG_DIR/models.yaml</string>
         <string>--port</string>
-        <string>8085</string>
+        <string>11435</string>
     </array>
 
     <key>RunAtLoad</key>

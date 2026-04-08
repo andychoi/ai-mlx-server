@@ -10,7 +10,7 @@
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>exec ai-mlx-server --models-config ~/.config/ai-mlx-server/models.yaml --port 8085</string>
+        <string>exec ai-mlx-server --models-config ~/.config/ai-mlx-server/models.yaml --port 11435</string>
     </array>
 
     <key>RunAtLoad</key>

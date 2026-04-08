@@ -5,12 +5,12 @@ Runs on Apple Silicon. Exposes an OpenAI-compatible API so any client
 that speaks to Ollama or OpenAI can use this server transparently.
 
 Usage:
-    python server.py --port 8085
-    python server.py --model mlx-community/gemma-4-27b-it-4bit --port 8085
-    python server.py --model mlx-community/gemma-4-27b-it-4bit --adapter-path lora/adapters/my-adapter --port 8085
+    python server.py --port 11435
+    python server.py --model mlx-community/gemma-4-27b-it-4bit --port 11435
+    python server.py --model mlx-community/gemma-4-27b-it-4bit --adapter-path lora/adapters/my-adapter --port 11435
 
 Docker containers reach it via:
-    OLLAMA_URL=http://host.docker.internal:8085
+    OLLAMA_URL=http://host.docker.internal:11435
 """
 
 import io
@@ -757,8 +757,8 @@ def main():
                         help="Default model to preload (HuggingFace path)")
     parser.add_argument("--host", type=str, default="0.0.0.0",
                         help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8085,
-                        help="Port (default: 8085)")
+    parser.add_argument("--port", type=int, default=11435,
+                        help="Port (default: 11435)")
     parser.add_argument("--trust-remote-code", action="store_true",
                         help="Trust remote code for tokenizer")
     parser.add_argument("--chat-template", type=str, default=None)

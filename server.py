@@ -22,7 +22,23 @@ import threading
 import time
 from datetime import datetime, timezone
 from functools import partial
+import socket
 from http.server import HTTPServer
+
+
+class DualStackHTTPServer(HTTPServer):
+    """HTTPServer that binds to both IPv4 and IPv6.
+
+    httpx (used by the ollama SDK) applies Happy Eyeballs and prefers IPv6.
+    Python's default HTTPServer only binds AF_INET, so IPv6 attempts are refused.
+    Setting IPV6_V6ONLY=False on an AF_INET6 socket creates a dual-stack listener
+    that accepts both native IPv6 and IPv4-mapped (::ffff:x.x.x.x) connections.
+    """
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
 
 from mlx_lm.server import APIHandler, ModelProvider, LRUPromptCache, ResponseGenerator
 
@@ -495,6 +511,11 @@ class MLXAPIHandler(APIHandler):
         if self.path == "/api/embeddings":
             self._handle_ollama_embeddings()
             return
+        if self.path == "/api/embed":
+            # Newer Ollama endpoint — accepts {"model":..., "input": str|list}
+            # Returns Ollama format: {"embeddings": [[...]]}
+            self._handle_ollama_embed()
+            return
         if self.path == "/api/generate":
             self._handle_ollama_chat(wrap_prompt=True)
             return
@@ -694,6 +715,42 @@ class MLXAPIHandler(APIHandler):
             self._handle_embeddings()
         except Exception as e:
             log.error("Ollama embeddings failed: %s", e)
+            self._json_response(500, {"error": str(e)})
+
+    def _handle_ollama_embed(self):
+        """Handle POST /api/embed — newer Ollama batched embed endpoint.
+
+        Accepts {"model": str, "input": str | list[str]} and returns
+        {"model": str, "embeddings": [[float, ...], ...]} as Ollama specifies.
+        """
+        try:
+            raw = self._read_body()
+            body = json.loads(raw.decode())
+
+            model_path = body.get("model", "")
+            input_value = body.get("input", "")
+
+            if not model_path:
+                self._json_response(400, {"error": "model is required"})
+                return
+
+            texts = input_value if isinstance(input_value, list) else [input_value]
+            if not texts or not any(texts):
+                self._json_response(400, {"error": "input is required"})
+                return
+
+            model, tokenizer = _get_embed_model(model_path)
+
+            embeddings = []
+            with _embed_lock:
+                for text in texts:
+                    input_ids = tokenizer.encode(text, return_tensors="mlx")
+                    outputs = model(input_ids)
+                    embeddings.append(outputs.text_embeds[0].tolist())
+
+            self._json_response(200, {"model": model_path, "embeddings": embeddings})
+        except Exception as e:
+            log.error("Ollama embed failed: %s", e)
             self._json_response(500, {"error": str(e)})
 
     def _handle_ollama_chat(self, *, wrap_prompt: bool):
@@ -904,8 +961,12 @@ def main():
                         help="Chat model to preload at startup (can be specified multiple times)")
     parser.add_argument("--preload-embedding", action="append", metavar="MODEL",
                         help="Embedding model to preload at startup (can be specified multiple times)")
-    parser.add_argument("--models-config", type=str, default=None, metavar="PATH",
-                        help="Path to YAML config file listing models to preload")
+    _default_config = os.path.expanduser("~/.config/ai-mlx-server/models.yaml")
+    parser.add_argument("--models-config", type=str,
+                        default=_default_config if os.path.exists(_default_config) else None,
+                        metavar="PATH",
+                        help="Path to YAML config file listing models to preload "
+                             "(default: ~/.config/ai-mlx-server/models.yaml if it exists)")
     # Phase 2.2: LRU eviction limits
     parser.add_argument("--max-resident-models", type=int, default=None, metavar="N",
                         help="Maximum number of models to keep in memory")
@@ -1015,7 +1076,7 @@ def main():
         system_fingerprint="mlx-server",
     )
 
-    server = HTTPServer((args.host, args.port), handler)
+    server = DualStackHTTPServer((args.host, args.port), handler)
     log.info("MLX server listening on %s:%d", args.host, args.port)
     if args.model:
         log.info("Default model: %s", args.model)
@@ -1023,7 +1084,7 @@ def main():
         log.info("LoRA adapter: %s", args.adapter_path)
     log.info(
         "Endpoints: /v1/chat/completions, /v1/embeddings, /health, "
-        "/api/generate, /api/chat, /api/embeddings, /api/tags, /api/version"
+        "/api/generate, /api/chat, /api/embeddings, /api/embed, /api/tags, /api/version"
     )
 
     try:

@@ -65,7 +65,8 @@ python server.py --model mlx-community/gemma-4-27b-it-4bit --port 11435
 | `POST /v1/embeddings` | Text embeddings (batched) |
 | `POST /api/generate` | Ollama generate endpoint |
 | `POST /api/chat` | Ollama chat endpoint |
-| `POST /api/embeddings` | Ollama embeddings endpoint |
+| `POST /api/embeddings` | Ollama embeddings endpoint (legacy `prompt` field) |
+| `POST /api/embed` | Ollama embed endpoint (newer batched `input` field) |
 | `GET /api/tags` | List loaded models (Ollama format) |
 | `GET /api/version` | Server version |
 | `GET /health` | Rich health check (uptime, RAM, queue depth) |

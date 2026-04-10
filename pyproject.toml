@@ -17,7 +17,8 @@ dev = ["pytest", "httpx"]
 
 [tool.setuptools]
 packages = []
-py-modules = ["server", "cache", "invoke", "metrics"]
+py-modules = ["server", "cache", "invoke", "metrics", "mlx_tool"]
 
 [project.scripts]
 ai-mlx-server = "server:main"
+mlx-tool = "mlx_tool:main"

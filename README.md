@@ -150,10 +150,17 @@ curl http://localhost:11435/api/chat -d '{
 }'
 ```
 
-All three are **optional** — omitting them uses the model's default behaviour.
+All three are **optional** — omitting them lets the default behaviour apply.
 When any of these fields is present the request is routed through `invoke.py` directly
 (non-streaming, no tool-calling); streaming requests that need thinking control should use
 `thinking_budget` instead.
+
+**Default: thinking is OFF for Qwen3/3.5 models.** If the request does not
+include `enable_thinking` or `thinking_budget`, the server automatically sets
+`enable_thinking=false` for any model whose name contains `qwen3`. This
+prevents `<think>…</think>` blocks from appearing in responses, which breaks
+structured-output consumers like LightRAG. To explicitly enable thinking, pass
+`"options": {"enable_thinking": true}` or `"thinking_budget": N`.
 
 ## Bare Model Tags
 

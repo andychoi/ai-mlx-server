@@ -799,6 +799,29 @@ class MLXAPIHandler(APIHandler):
                     openai_body.setdefault("enable_thinking", False)
                 break
 
+        # Default thinking off for Qwen3/3.5 models unless explicitly enabled.
+        # These models emit <think>...</think> blocks by default which breaks
+        # structured-output consumers (e.g. LightRAG entity extraction).
+        # Prepend /no_think to the system prompt so the model suppresses thinking
+        # natively — this avoids routing through _handle_thinking_completion which
+        # returns OpenAI format incompatible with Ollama clients.
+        if "enable_thinking" not in openai_body and "thinking_budget" not in openai_body \
+                and "chat_template_kwargs" not in openai_body:
+            model_lower = (model or "").lower()
+            if "qwen3" in model_lower:
+                messages = openai_body.get("messages", [])
+                injected = False
+                for msg in messages:
+                    if msg.get("role") == "system":
+                        content = msg.get("content", "")
+                        if not content.lstrip().startswith("/no_think"):
+                            msg["content"] = "/no_think " + content
+                        injected = True
+                        break
+                if not injected:
+                    messages.insert(0, {"role": "system", "content": "/no_think"})
+                    openai_body["messages"] = messages
+
         # Route through invoke() when any thinking/template-control field is present.
         # This is optional — requests without these fields take the normal streaming path.
         if (

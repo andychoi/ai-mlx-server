@@ -12,13 +12,14 @@ Extracted from [ai-docs](https://github.com/andychoi/ai-docs) for standalone use
 - **Tool calling** — pass `tools: [...]` in the request body; works with tool-capable models (e.g. Qwen3)
 
 ### Added by ai-mlx-server
-- **Ollama-compatible API** — `POST /api/generate`, `/api/chat`, `/api/embeddings`; `GET /api/tags`, `/api/version`
+- **Ollama-compatible API** — `POST /api/generate`, `/api/chat`, `/api/embeddings`, `/api/show`; `GET /api/tags`, `/api/version`, `/api/ps`
 - **Batched embeddings** (`POST /v1/embeddings`) — accepts `input: str | list[str]`
 - **Multi-model warm pool** — `--preload MODEL` (chat), `--preload-embedding MODEL` (embeddings)
 - **LRU model eviction** — `--max-resident-models N`, `--max-resident-gb N`
 - **Rich `/health`** — uptime, resident models, RAM stats, queue depth
 - **Prometheus `/metrics`** — install with `pip install ai-mlx-server[metrics]`
 - **Thinking control** — disable/enable reasoning via `options.enable_thinking`, `chat_template_kwargs`, or the `/no_think` system-prompt prefix (Qwen3-compatible)
+- **Model aliases** — map Ollama-style short names (`gemma4:e4b`, `qwen3.5:9b`) to HuggingFace repo IDs via `models.yaml`
 - **Bare model tags** — `snowflake-arctic-embed-l-v2.0-4bit` auto-resolves to `mlx-community/snowflake-arctic-embed-l-v2.0-4bit`
 - **Bearer-token auth** — `--api-key KEY` or `MLX_API_KEY` env var
 - **LoRA adapters** — `--adapter-path path/to/adapter`
@@ -67,7 +68,9 @@ python server.py --model mlx-community/gemma-4-27b-it-4bit --port 11434
 | `POST /api/chat` | Ollama chat endpoint |
 | `POST /api/embeddings` | Ollama embeddings endpoint (legacy `prompt` field) |
 | `POST /api/embed` | Ollama embed endpoint (newer batched `input` field) |
+| `POST /api/show` | Ollama model info (family, parameter size, quantization) |
 | `GET /api/tags` | List loaded models (Ollama format) |
+| `GET /api/ps` | List currently resident models with memory usage |
 | `GET /api/version` | Server version |
 | `GET /health` | Rich health check (uptime, RAM, queue depth) |
 | `GET /metrics` | Prometheus metrics (requires `[metrics]` extra) |
@@ -161,6 +164,27 @@ include `enable_thinking` or `thinking_budget`, the server automatically sets
 prevents `<think>…</think>` blocks from appearing in responses, which breaks
 structured-output consumers like LightRAG. To explicitly enable thinking, pass
 `"options": {"enable_thinking": true}` or `"thinking_budget": N`.
+
+## Model Aliases
+
+Map Ollama-style short names (including tags like `:e4b`, `:9b`) to full HuggingFace repo IDs
+in `~/.config/ai-mlx-server/models.yaml`:
+
+```yaml
+aliases:
+  gemma4:e4b: mlx-community/gemma-4-e4b-it-4bit
+  gemma4:31b: mlx-community/gemma-4-31b-it-4bit
+  gemma4: mlx-community/gemma-4-e4b-it-4bit      # default tag
+  qwen3.5:9b: mlx-community/Qwen3.5-9B-MLX-4bit
+  qwen3.5:35b: mlx-community/Qwen3.5-35B-A3B-4bit
+```
+
+Resolution order: exact tag match → tag-stripped match → `mlx-community/` prefix → pass through.
+
+The server logs all loaded aliases at startup:
+```
+INFO Loaded 5 model alias(es): gemma4:e4b → mlx-community/gemma-4-e4b-it-4bit, ...
+```
 
 ## Bare Model Tags
 

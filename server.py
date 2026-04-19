@@ -81,6 +81,9 @@ _workers_lock = threading.Lock()
 # Set by main() so _get_or_create_worker can build ModelProvider instances.
 _server_args = None
 
+# ── Model alias table (populated from models.yaml aliases: section) ──────────
+_model_aliases: dict[str, str] = {}
+
 
 def _load_embed_model(model_path: str):
     """Load an embedding model, trying offline cache first."""
@@ -105,12 +108,28 @@ def _load_embed_model(model_path: str):
 
 
 def _resolve_model_path(model_path: str) -> str:
-    """Resolve a bare model tag (no '/') to the mlx-community HuggingFace namespace.
+    """Resolve a model name to a HuggingFace repo ID.
 
-    e.g. 'snowflake-arctic-embed-l-v2.0-4bit' → 'mlx-community/snowflake-arctic-embed-l-v2.0-4bit'
-    Local paths (starting with '/' or '.') and fully-qualified HF ids are returned unchanged.
+    Resolution order:
+    1. Exact alias match (e.g. 'gemma4:e4b' → configured HF repo)
+    2. Tag-stripped alias match (e.g. 'gemma4:e4b' strips to 'gemma4', checks alias)
+    3. Strip Ollama-style :tag suffix (HuggingFace IDs don't allow colons)
+    4. Bare names get 'mlx-community/' prefix (e.g. 'gemma4' → 'mlx-community/gemma4')
+    5. Local paths ('/' or '.') are returned unchanged.
     """
-    if model_path and "/" not in model_path and not model_path.startswith("."):
+    if not model_path:
+        return model_path
+    # 1. Exact alias lookup (tag-aware: 'gemma4:e4b' → specific repo)
+    if model_path in _model_aliases:
+        return _model_aliases[model_path]
+    # 2. Tag-stripped alias lookup, then general tag stripping
+    if ":" in model_path and not model_path.startswith("/") and not model_path.startswith("."):
+        stripped = model_path.split(":")[0]
+        if stripped in _model_aliases:
+            return _model_aliases[stripped]
+        model_path = stripped
+    # 3. Bare name → mlx-community namespace
+    if "/" not in model_path and not model_path.startswith("."):
         return f"mlx-community/{model_path}"
     return model_path
 
@@ -168,7 +187,7 @@ def _get_or_create_worker(model_id: str) -> "ResponseGenerator":
 
     base = _server_args if _server_args is not None else argparse.Namespace()
     args_copy = copy.copy(base)
-    args_copy.model = model_id
+    args_copy.model = _resolve_model_path(model_id)
     # mlx_lm ≥0.31.2 reads cli_args.allowed_origins in _set_cors_headers.
     if not hasattr(args_copy, "allowed_origins"):
         args_copy.allowed_origins = []
@@ -200,22 +219,52 @@ def _tear_down_worker(model_id: str) -> None:
         worker.stop_and_join()
 
 
-def _parse_models_config(path: str) -> list[dict]:
-    """Parse a simple models.yaml. No pyyaml required."""
+def _parse_models_config(path: str) -> tuple[list[dict], dict[str, str]]:
+    """Parse a simple models.yaml. No pyyaml required.
+
+    Supports two top-level sections:
+      models:   list of {id, role} entries to preload
+      aliases:  mapping of short name / Ollama tag → HuggingFace repo ID
+
+    Example aliases section:
+      aliases:
+        gemma4:e4b: mlx-community/gemma-4-e4b-it-4bit
+        gemma4:31b: mlx-community/gemma-4-31b-it-4bit
+        gemma4: mlx-community/gemma-4-e4b-it-4bit
+    """
     models = []
+    aliases: dict[str, str] = {}
     current: dict = {}
+    section = None  # 'models' | 'aliases'
     with open(path) as f:
         for line in f:
             line = line.rstrip()
-            if re.match(r'\s*-\s+id:', line):
-                if current:
-                    models.append(current)
-                current = {"id": re.sub(r'\s*-\s+id:\s*', '', line).strip()}
-            elif re.match(r'\s+role:', line):
-                current["role"] = line.split(":", 1)[1].strip()
+            if not line or line.lstrip().startswith("#"):
+                continue
+            if re.match(r'^models:\s*$', line):
+                section = "models"
+                continue
+            if re.match(r'^aliases:\s*$', line):
+                section = "aliases"
+                continue
+            if section == "models":
+                if re.match(r'\s*-\s+id:', line):
+                    if current:
+                        models.append(current)
+                    current = {"id": re.sub(r'\s*-\s+id:\s*', '', line).strip()}
+                elif re.match(r'\s+role:', line):
+                    current["role"] = line.split(":", 1)[1].strip()
+            elif section == "aliases":
+                # Split on first ': ' — key may itself contain colons (e.g. 'gemma4:e4b')
+                if ": " in line:
+                    key, _, val = line.partition(": ")
+                    key = key.strip()
+                    val = val.strip()
+                    if key and val:
+                        aliases[key] = val
     if current:
         models.append(current)
-    return models
+    return models, aliases
 
 
 # ── Ollama adapter ───────────────────────────────────────────────────────────
@@ -497,6 +546,9 @@ class MLXAPIHandler(APIHandler):
             ]
             self._json_response(200, {"models": models})
             return
+        if self.path == "/api/ps":
+            self._handle_ollama_ps()
+            return
         self.send_response(404)
         self.end_headers()
         self.wfile.write(b"Not Found")
@@ -516,6 +568,9 @@ class MLXAPIHandler(APIHandler):
             # Newer Ollama endpoint — accepts {"model":..., "input": str|list}
             # Returns Ollama format: {"embeddings": [[...]]}
             self._handle_ollama_embed()
+            return
+        if self.path == "/api/show":
+            self._handle_ollama_show()
             return
         if self.path == "/api/generate":
             self._handle_ollama_chat(wrap_prompt=True)
@@ -636,7 +691,23 @@ class MLXAPIHandler(APIHandler):
 
     def _dispatch_to_worker(self, model_id: str) -> None:
         """Swap self.response_generator to the per-model worker and call parent do_POST."""
-        worker = _get_or_create_worker(model_id)
+        resolved = _resolve_model_path(model_id)
+        worker = _get_or_create_worker(resolved)
+        # Rewrite the model field in the request body so the parent handler
+        # passes the resolved HF repo ID (not the Ollama-style name) to
+        # model_provider.load() inside the worker thread.
+        content_length = int(self.headers.get("Content-Length", 0))
+        saved_rfile = self.rfile
+        raw = self.rfile.read(content_length)
+        try:
+            body = json.loads(raw)
+            body["model"] = resolved
+            rewritten = json.dumps(body).encode()
+            self.rfile = io.BytesIO(rewritten)
+            self.headers.replace_header("Content-Length", str(len(rewritten)))
+        except Exception:
+            # Restore original bytes on any failure
+            self.rfile = io.BytesIO(raw)
         original_rg = self.response_generator
         self.response_generator = worker
         try:
@@ -698,6 +769,78 @@ class MLXAPIHandler(APIHandler):
         self._json_response(200, response)
 
     # ── Ollama route handlers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _ollama_model_details(name: str) -> dict:
+        """Derive Ollama-style model details from a HuggingFace repo name.
+
+        Heuristically extracts family, parameter_size, and quantization_level
+        from names like 'mlx-community/Qwen3.5-9B-MLX-4bit' or 'gemma-4-e4b-it-4bit'.
+        """
+        base = name.split("/")[-1].lower()
+        # Parameter size: look for patterns like 9b, 27b, 0.6b, 3b, a3b (MoE active)
+        param_match = re.search(r'(\d+(?:\.\d+)?b(?:-a\d+b)?)', base)
+        parameter_size = param_match.group(1).upper() if param_match else ""
+        # Quantization: look for 4bit, 8bit, 6bit, 3bit, bf16, fp16, mxfp4, mxfp8
+        quant_match = re.search(r'(\d+bit|bf16|fp16|mxfp\d+|nvfp\d+|optiq-\d+bit)', base)
+        quantization_level = quant_match.group(1) if quant_match else ""
+        # Family: first meaningful word before the size token
+        family_match = re.match(r'([a-z][a-z0-9._-]+?)[\s\-_]?\d', base)
+        family = family_match.group(1).rstrip("-_") if family_match else base.split("-")[0]
+        return {
+            "parent_model": "",
+            "format": "mlx",
+            "family": family,
+            "families": [family],
+            "parameter_size": parameter_size,
+            "quantization_level": quantization_level,
+        }
+
+    def _handle_ollama_ps(self):
+        """Handle GET /api/ps — list currently loaded (resident) models."""
+        entries = []
+        for stat in _model_cache.stats():
+            name = stat["id"]
+            entries.append({
+                "name": name,
+                "model": name,
+                "size": stat["size_gb"] and int(stat["size_gb"] * 1e9),
+                "size_vram": int(stat["size_gb"] * 1e9),  # unified memory on Apple Silicon
+                "digest": "",
+                "details": self._ollama_model_details(name),
+                "expires_at": "",  # we don't expire resident models automatically
+            })
+        self._json_response(200, {"models": entries})
+
+    def _handle_ollama_show(self):
+        """Handle POST /api/show — return metadata for a named model."""
+        try:
+            raw = self._read_body()
+            body = json.loads(raw.decode())
+        except Exception as e:
+            self._json_response(400, {"error": f"Invalid JSON: {e}"})
+            return
+
+        name = _resolve_model_path(body.get("model") or self._default_model or "")
+        if not name:
+            self._json_response(400, {"error": "model is required"})
+            return
+
+        known = set(_loaded_model_names)
+        if self._default_model:
+            known.add(self._default_model)
+        if name not in known:
+            self._json_response(404, {"error": f"model '{name}' not found"})
+            return
+
+        details = self._ollama_model_details(name)
+        self._json_response(200, {
+            "modelfile": f"# MLX model: {name}\nFROM {name}\n",
+            "parameters": "",
+            "template": "",
+            "details": details,
+            "model_info": {},
+        })
 
     def _handle_ollama_embeddings(self):
         """Handle POST /api/embeddings — Ollama uses 'prompt' instead of 'input'."""
@@ -803,29 +946,20 @@ class MLXAPIHandler(APIHandler):
         # Default thinking off for Qwen3/3.5 models unless explicitly enabled.
         # These models emit <think>...</think> blocks by default which breaks
         # structured-output consumers (e.g. LightRAG entity extraction).
-        # Prepend /no_think to the system prompt so the model suppresses thinking
-        # natively — this avoids routing through _handle_thinking_completion which
-        # returns OpenAI format incompatible with Ollama clients.
+        # Use chat_template_kwargs to disable thinking at the template level
+        # (the /no_think prompt prefix is unreliable with some Qwen3.5 variants).
+        _qwen3_thinking_injected = False
         if "enable_thinking" not in openai_body and "thinking_budget" not in openai_body \
                 and "chat_template_kwargs" not in openai_body:
             model_lower = (model or "").lower()
             if "qwen3" in model_lower:
-                messages = openai_body.get("messages", [])
-                injected = False
-                for msg in messages:
-                    if msg.get("role") == "system":
-                        content = msg.get("content", "")
-                        if not content.lstrip().startswith("/no_think"):
-                            msg["content"] = "/no_think " + content
-                        injected = True
-                        break
-                if not injected:
-                    messages.insert(0, {"role": "system", "content": "/no_think"})
-                    openai_body["messages"] = messages
+                openai_body["chat_template_kwargs"] = {"enable_thinking": False}
+                _qwen3_thinking_injected = True
 
-        # Route through invoke() when any thinking/template-control field is present.
-        # This is optional — requests without these fields take the normal streaming path.
-        if (
+        # Route through invoke() when any thinking/template-control field is present,
+        # UNLESS we auto-injected it for Qwen3 (which should use the normal
+        # streaming path to preserve Ollama format compatibility).
+        if not _qwen3_thinking_injected and (
             "thinking_budget" in openai_body
             or "enable_thinking" in openai_body
             or "chat_template_kwargs" in openai_body
@@ -1080,7 +1214,11 @@ def main():
 
     if args.models_config:
         try:
-            config_models = _parse_models_config(args.models_config)
+            config_models, config_aliases = _parse_models_config(args.models_config)
+            if config_aliases:
+                _model_aliases.update(config_aliases)
+                log.info("Loaded %d model alias(es): %s", len(config_aliases),
+                         ", ".join(f"{k} → {v}" for k, v in config_aliases.items()))
             for entry in config_models:
                 model_id = entry.get("id", "")
                 role = entry.get("role", "chat")

@@ -7,10 +7,10 @@ against a running server, then prints a side-by-side comparison table.
 Usage:
     python bench.py
     python bench.py --models gemma-4-e4b-it-4bit mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-4bit mlx-community/Qwen3.5-27B-MLX-4bit
-    python bench.py --server http://localhost:11435 --skip-embed
+    python bench.py --server http://localhost:11434 --skip-embed
 
 Health check:
-    curl -s http://localhost:11435/health | python3 -m json.tool    
+    curl -s http://localhost:11434/health | python3 -m json.tool    
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ CYAN  = lambda t: _c("36",     t)
 YELLOW= lambda t: _c("33",     t)
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
-DEFAULT_SERVER = "http://localhost:11435"
+DEFAULT_SERVER = "http://localhost:11434"
 DEFAULT_MODELS = ["Qwen3-1.7B-4bit", "gemma-3-1b-it-bf16"]
 # Models known to support thinking templates (chat_template_kwargs / enable_thinking)
 THINKING_MODELS = {"qwen", "qwq", "gemma"}
@@ -288,7 +288,7 @@ def main() -> None:
         requests.get(f"{args.server}/health", timeout=5).raise_for_status()
     except Exception:
         print(RED(f"Server not reachable at {args.server}"))
-        print("Start it with:  python server.py --port 11435")
+        print("Start it with:  python server.py --port 11434")
         sys.exit(1)
 
     results: list[Result] = []

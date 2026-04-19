@@ -5,12 +5,13 @@ Runs on Apple Silicon. Exposes an OpenAI-compatible API so any client
 that speaks to Ollama or OpenAI can use this server transparently.
 
 Usage:
-    python server.py --port 11435
-    python server.py --model mlx-community/gemma-4-27b-it-4bit --port 11435
-    python server.py --model mlx-community/gemma-4-27b-it-4bit --adapter-path lora/adapters/my-adapter --port 11435
+    python server.py
+    python server.py --model mlx-community/gemma-4-27b-it-4bit
+    python server.py --model mlx-community/gemma-4-27b-it-4bit --adapter-path lora/adapters/my-adapter
+    python server.py --list   # show locally cached HuggingFace models and exit
 
 Docker containers reach it via:
-    OLLAMA_URL=http://host.docker.internal:11435
+    OLLAMA_URL=http://host.docker.internal:11434
 """
 
 import io
@@ -946,6 +947,31 @@ class MLXAPIHandler(APIHandler):
             self._json_response(500, {"error": str(e)})
 
 
+def _list_local_models() -> None:
+    """Print HuggingFace models cached locally and exit."""
+    hf_cache = os.path.expanduser(
+        os.environ.get("HF_HOME", os.environ.get("HUGGINGFACE_HUB_CACHE", "~/.cache/huggingface/hub"))
+    )
+    if not os.path.isdir(hf_cache):
+        print(f"No HuggingFace cache found at {hf_cache}")
+        return
+    models = []
+    for entry in sorted(os.listdir(hf_cache)):
+        if entry.startswith("models--"):
+            # models--org--repo  →  org/repo
+            parts = entry[len("models--"):].split("--", 1)
+            if len(parts) == 2:
+                models.append(f"{parts[0]}/{parts[1]}")
+            else:
+                models.append(parts[0])
+    if not models:
+        print("No models found in local HuggingFace cache.")
+        return
+    print(f"Local models ({len(models)}) in {hf_cache}:")
+    for m in models:
+        print(f"  {m}")
+
+
 def main():
     import argparse
 
@@ -954,8 +980,8 @@ def main():
                         help="Default model to preload (HuggingFace path)")
     parser.add_argument("--host", type=str, default="0.0.0.0",
                         help="Bind address (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=11435,
-                        help="Port (default: 11435)")
+    parser.add_argument("--port", type=int, default=11434,
+                        help="Port (default: 11434 — matches Ollama)")
     parser.add_argument("--trust-remote-code", action="store_true",
                         help="Trust remote code for tokenizer")
     parser.add_argument("--chat-template", type=str, default=None)
@@ -1006,8 +1032,14 @@ def main():
                         help="CORS allowed origins (passed through to mlx_lm)")
     parser.add_argument("--allow-download", action="store_true",
                         help="Allow automatic model downloads from HuggingFace (default: offline-only)")
+    parser.add_argument("--list", action="store_true",
+                        help="List locally cached HuggingFace models and exit")
 
     args = parser.parse_args()
+
+    if args.list:
+        _list_local_models()
+        return
     global _server_args
     _server_args = args
     logging.getLogger().setLevel(getattr(logging, args.log_level))
@@ -1055,7 +1087,7 @@ def main():
                 if not model_id:
                     continue
                 if role == "embedding":
-                    preload_embed.append(model_id)
+                    pass  # embedding models are not preloaded by default; use --preload-embedding
                 else:
                     preload_chat.append(model_id)
         except Exception as e:

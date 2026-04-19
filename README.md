@@ -54,7 +54,7 @@ Edit `~/.config/ai-mlx-server/models.yaml` to configure which models to preload 
 
 ```bash
 pip install -e .
-python server.py --model mlx-community/gemma-4-27b-it-4bit --port 11435
+python server.py --model mlx-community/gemma-4-27b-it-4bit --port 11434
 ```
 
 ## Endpoints
@@ -93,7 +93,7 @@ Warm pool / eviction:
 
 Network:
   --host HOST               Bind address (default: 0.0.0.0)
-  --port PORT               Port (default: 11435)
+  --port PORT               Port (default: 11434)
 
 Generation defaults:
   --temp FLOAT              Sampling temperature (default: 0.0)
@@ -127,14 +127,14 @@ chain. Three equivalent ways to do this via the Ollama `/api/chat` endpoint:
 
 ```bash
 # 1. options.enable_thinking (bool)
-curl http://localhost:11435/api/chat -d '{
+curl http://localhost:11434/api/chat -d '{
   "model": "Qwen3-4B-4bit",
   "messages": [{"role":"user","content":"17 × 23?"}],
   "options": {"enable_thinking": false}
 }'
 
 # 2. /no_think prefix in the system prompt (Qwen3 prompt token)
-curl http://localhost:11435/api/chat -d '{
+curl http://localhost:11434/api/chat -d '{
   "model": "Qwen3-4B-4bit",
   "messages": [
     {"role":"system","content":"/no_think Be concise."},
@@ -143,7 +143,7 @@ curl http://localhost:11435/api/chat -d '{
 }'
 
 # 3. chat_template_kwargs — arbitrary apply_chat_template overrides
-curl http://localhost:11435/api/chat -d '{
+curl http://localhost:11434/api/chat -d '{
   "model": "Qwen3-4B-4bit",
   "messages": [{"role":"user","content":"17 × 23?"}],
   "chat_template_kwargs": {"enable_thinking": false}
@@ -192,7 +192,7 @@ python bench.py --models Qwen3-4B-4bit gemma-3-4b-it-4bit
 python bench.py --skip-embed
 
 # Custom server
-python bench.py --server http://my-mac.local:11435
+python bench.py --server http://my-mac.local:11434
 ```
 
 The script tests: factual recall, arithmetic, code generation, thinking-control features
@@ -205,10 +205,10 @@ Point any Ollama-compatible client at this server:
 
 ```bash
 # ai-docs
-OLLAMA_URL=http://localhost:11435 ./scripts/dev.sh --pg
+OLLAMA_URL=http://localhost:11434 ./scripts/dev.sh --pg
 
 # Docker containers
-OLLAMA_URL=http://host.docker.internal:11435
+OLLAMA_URL=http://host.docker.internal:11434
 ```
 
 ## LoRA Fine-Tuning
@@ -222,7 +222,7 @@ python -m mlx_lm.lora --model mlx-community/gemma-4-27b-it-4bit \
 
 # Serve with adapter
 python server.py --model mlx-community/gemma-4-27b-it-4bit \
-  --adapter-path lora/adapters/my-adapter --port 11435
+  --adapter-path lora/adapters/my-adapter --port 11434
 ```
 
 ## In-Process Use

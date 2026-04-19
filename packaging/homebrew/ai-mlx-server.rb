@@ -25,7 +25,7 @@ class AiMlxServer < Formula
   def caveats
     <<~EOS
       ai-mlx-server is installed. To run it:
-        ai-mlx-server --port 11435
+        ai-mlx-server --port 11434
 
       To install as a macOS background service:
         ai-mlx-server-install-service

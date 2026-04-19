@@ -114,7 +114,7 @@ def test_tool_calling_integration():
     """
     import httpx
     resp = httpx.post(
-        "http://localhost:11435/v1/chat/completions",
+        "http://localhost:11434/v1/chat/completions",
         json={
             "model": "mlx-community/Qwen3-4B-Instruct-2507-4bit-DWQ",
             "messages": [{"role": "user", "content": "What's the weather in Paris?"}],

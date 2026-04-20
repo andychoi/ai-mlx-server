@@ -107,28 +107,95 @@ def _load_embed_model(model_path: str):
             os.environ["HF_HUB_OFFLINE"] = orig
 
 
+def _hf_cache_dir() -> str:
+    return os.path.expanduser(
+        os.environ.get("HF_HOME", os.environ.get("HUGGINGFACE_HUB_CACHE", "~/.cache/huggingface/hub"))
+    )
+
+
+def _local_hf_models() -> list[str]:
+    """Return canonical HF repo IDs (org/repo) found in the local HF cache."""
+    hf_cache = _hf_cache_dir()
+    models: list[str] = []
+    if not os.path.isdir(hf_cache):
+        return models
+    for entry in sorted(os.listdir(hf_cache)):
+        if entry.startswith("models--"):
+            parts = entry[len("models--"):].split("--", 1)
+            if len(parts) == 2:
+                models.append(f"{parts[0]}/{parts[1]}")
+            else:
+                models.append(parts[0])
+    return models
+
+
+def _hf_id_to_ollama_name(hf_id: str) -> str:
+    """Convert HF repo ID → Ollama-style 'family:size' (e.g. 'qwen3.5:9b', 'gemma4:4b').
+
+    Looks for a parameter-size token (NNb) at a word boundary (-/_ separator).
+    A second pass accepts single-letter variant prefixes like 'e4b' or 'a4b'.
+    Falls back to 'basename:latest' when no size token is found (embedding models, etc.).
+    """
+    base = hf_id.split("/")[-1].lower()
+    # Pass 1: standalone size — '-9b-', '-0.5b-', '-9b$' (but NOT '-4bit')
+    m = re.search(r'(?:^|[-_])(\d+(?:\.\d+)?[bB])(?=[_-]|$)', base)
+    if not m:
+        # Pass 2: single-letter variant prefix — '-e4b-', '-a4b-'
+        m = re.search(r'[-_][a-z](\d+(?:\.\d+)?[bB])(?=[_-]|$)', base)
+    if not m:
+        return f"{base}:latest"
+    param_size = m.group(1)
+    prefix = base[:m.start()].rstrip("-_")
+    # Collapse letter-digit version dashes: 'gemma-4' → 'gemma4'
+    family = re.sub(r'([a-z])-(\d)', r'\1\2', prefix)
+    return f"{family}:{param_size}"
+
+
+def _ollama_to_hf_map() -> dict[str, str]:
+    """Build a map from Ollama-style name → canonical HF ID, preferring MLX models."""
+    result: dict[str, str] = {}
+    for hf_id in _local_hf_models():
+        name = _hf_id_to_ollama_name(hf_id)
+        existing = result.get(name)
+        if existing is None:
+            result[name] = hf_id
+        elif "-mlx-" in hf_id.lower() and "-mlx-" not in existing.lower():
+            result[name] = hf_id  # prefer the explicit MLX-format model
+    return result
+
+
 def _resolve_model_path(model_path: str) -> str:
     """Resolve a model name to a HuggingFace repo ID.
 
     Resolution order:
     1. Exact alias match (e.g. 'gemma4:e4b' → configured HF repo)
-    2. Tag-stripped alias match (e.g. 'gemma4:e4b' strips to 'gemma4', checks alias)
-    3. Strip Ollama-style :tag suffix (HuggingFace IDs don't allow colons)
-    4. Bare names get 'mlx-community/' prefix (e.g. 'gemma4' → 'mlx-community/gemma4')
-    5. Local paths ('/' or '.') are returned unchanged.
+    2. Ollama-style name lookup before tag stripping (e.g. 'qwen3.5:2b' → HF ID)
+    3. Tag-stripped alias lookup, then general tag stripping
+    4. Case-insensitive match against local HF cache (bare name or full org/repo)
+    5. Bare names get 'mlx-community/' prefix (e.g. 'gemma4' → 'mlx-community/gemma4')
+    6. Local paths ('/' or '.') are returned unchanged.
     """
     if not model_path:
         return model_path
     # 1. Exact alias lookup (tag-aware: 'gemma4:e4b' → specific repo)
     if model_path in _model_aliases:
         return _model_aliases[model_path]
-    # 2. Tag-stripped alias lookup, then general tag stripping
+    # 2. Ollama-style name lookup (must happen before tag stripping to preserve 'family:size')
     if ":" in model_path and not model_path.startswith("/") and not model_path.startswith("."):
+        ollama_map = _ollama_to_hf_map()
+        if model_path in ollama_map:
+            return ollama_map[model_path]
+        # 3. Tag-stripped alias lookup
         stripped = model_path.split(":")[0]
         if stripped in _model_aliases:
             return _model_aliases[stripped]
         model_path = stripped
-    # 3. Bare name → mlx-community namespace
+    # 4. Case-insensitive match against local cache (bare name or org/repo)
+    needle = model_path.lower()
+    for hf_id in _local_hf_models():
+        if hf_id.lower() == needle or hf_id.split("/")[-1].lower() == needle:
+            return hf_id
+    # 5. Bare name → mlx-community namespace
     if "/" not in model_path and not model_path.startswith("."):
         return f"mlx-community/{model_path}"
     return model_path
@@ -1082,28 +1149,25 @@ class MLXAPIHandler(APIHandler):
 
 
 def _list_local_models() -> None:
-    """Print HuggingFace models cached locally and exit."""
-    hf_cache = os.path.expanduser(
-        os.environ.get("HF_HOME", os.environ.get("HUGGINGFACE_HUB_CACHE", "~/.cache/huggingface/hub"))
-    )
+    """Print HuggingFace models cached locally with their Ollama-style short names."""
+    hf_cache = _hf_cache_dir()
     if not os.path.isdir(hf_cache):
         print(f"No HuggingFace cache found at {hf_cache}")
         return
-    models = []
-    for entry in sorted(os.listdir(hf_cache)):
-        if entry.startswith("models--"):
-            # models--org--repo  →  org/repo
-            parts = entry[len("models--"):].split("--", 1)
-            if len(parts) == 2:
-                models.append(f"{parts[0]}/{parts[1]}")
-            else:
-                models.append(parts[0])
+    models = _local_hf_models()
     if not models:
         print("No models found in local HuggingFace cache.")
         return
-    print(f"Local models ({len(models)}) in {hf_cache}:")
-    for m in models:
-        print(f"  {m}")
+    preferred = _ollama_to_hf_map()
+    visible = [m for m in models if preferred.get(_hf_id_to_ollama_name(m)) == m]
+    if not visible:
+        print("No models found in local HuggingFace cache.")
+        return
+    col_w = max(len(m) for m in visible) + 2
+    print(f"{'HuggingFace ID':<{col_w}}  Ollama name (use with --model)")
+    print(f"{'─' * col_w}  {'─' * 34}")
+    for m in visible:
+        print(f"  {m:<{col_w - 2}}  {_hf_id_to_ollama_name(m)}")
 
 
 def main():
@@ -1111,7 +1175,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="MLX inference server with embeddings and LoRA")
     parser.add_argument("--model", type=str, default=None,
-                        help="Default model to preload (HuggingFace path)")
+                        help="Default model to preload (HuggingFace path or Ollama-style name from --list)")
     parser.add_argument("--host", type=str, default="0.0.0.0",
                         help="Bind address (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=11434,
@@ -1177,6 +1241,10 @@ def main():
     global _server_args
     _server_args = args
     logging.getLogger().setLevel(getattr(logging, args.log_level))
+
+    # Resolve --model early so ModelProvider receives a valid HF repo ID.
+    if args.model:
+        args.model = _resolve_model_path(args.model)
 
     # Prevent accidental HF downloads unless --allow-download is set.
     # The embedding loader handles its own offline-first + fallback logic.

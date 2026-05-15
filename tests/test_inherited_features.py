@@ -18,6 +18,10 @@ def test_streaming_response_format():
     output = io.BytesIO()
     translator = _StreamTranslatorWfile(output, model="test-model")
 
+    # Prime the translator past its header-passthrough state.
+    translator.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n\r\n")
+    output.seek(0); output.truncate()
+
     # Simulate SSE chunks from parent handler
     chunk1 = {"choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]}
     chunk2 = {"choices": [{"delta": {"content": ""}, "finish_reason": "stop"}]}

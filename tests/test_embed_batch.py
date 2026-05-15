@@ -277,6 +277,10 @@ class TestOllamaEmbeddingsPath(unittest.TestCase):
         class FakeHeaders(dict):
             def get(self, key, default=None):
                 return self[key] if key in self else default
+            def replace_header(self, key, value):
+                # http.client.HTTPMessage exposes this; the dict stub doesn't,
+                # so emulate it for _handle_ollama_embeddings's Content-Length rewrite.
+                self[key] = value
 
         headers = FakeHeaders()
         headers["Content-Length"] = str(len(raw))

@@ -1,22 +1,33 @@
 #!/bin/bash
-# Uninstall ai-mlx-server macOS launchd user agent.
-# Usage: bash packaging/uninstall-service.sh [--purge]
+# Uninstall ai-mlx-server (LLM) or ai-mlx-imager (image-gen) launchd user agent.
+# Usage: bash packaging/uninstall-service.sh [--imager] [--purge]
 #
 # By default, the config (~/.config/ai-mlx-server) is preserved.
 # Pass --purge to also remove the config directory and log file.
 
 set -euo pipefail
 
-PLIST_NAME="com.andychoi.ai-mlx-server"
-PLIST_FILE="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
-BINARY="$HOME/.local/bin/ai-mlx-server"
-LOG_FILE="$HOME/Library/Logs/ai-mlx-server.log"
-CONFIG_DIR="$HOME/.config/ai-mlx-server"
-
+MODE="server"
 PURGE=false
 for arg in "$@"; do
-    [[ "$arg" == "--purge" ]] && PURGE=true
+    case "$arg" in
+        --imager) MODE="imager" ;;
+        --purge)  PURGE=true ;;
+    esac
 done
+
+if [ "$MODE" = "imager" ]; then
+    PLIST_NAME="com.andychoi.ai-mlx-imager"
+    BINARY="$HOME/.local/bin/ai-mlx-imager"
+    LOG_FILE="$HOME/Library/Logs/ai-mlx-imager.log"
+else
+    PLIST_NAME="com.andychoi.ai-mlx-server"
+    BINARY="$HOME/.local/bin/ai-mlx-server"
+    LOG_FILE="$HOME/Library/Logs/ai-mlx-server.log"
+fi
+
+PLIST_FILE="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
+CONFIG_DIR="$HOME/.config/ai-mlx-server"
 
 # 1. Unload and remove the launchd plist
 if launchctl list | grep -q "$PLIST_NAME" 2>/dev/null; then
@@ -41,7 +52,7 @@ else
     echo "Binary not found (already removed): $BINARY"
 fi
 
-# 3. Optionally remove config and logs
+# 3. Optionally remove config and logs (config is shared between the two services)
 if $PURGE; then
     if [ -d "$CONFIG_DIR" ]; then
         rm -rf "$CONFIG_DIR"

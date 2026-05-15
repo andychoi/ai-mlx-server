@@ -1,10 +1,32 @@
 #!/bin/bash
-# Install ai-mlx-server as a macOS launchd user agent.
-# Usage: bash packaging/install-service.sh
+# Install ai-mlx-server (LLM) or ai-mlx-imager (image-gen) as a macOS launchd user agent.
+# Usage: bash packaging/install-service.sh           # LLM server on port 11434
+#        bash packaging/install-service.sh --imager  # image server on port 11435
 
 set -euo pipefail
 
-PLIST_NAME="com.andychoi.ai-mlx-server"
+MODE="server"
+if [ "${1:-}" = "--imager" ]; then
+    MODE="imager"
+fi
+
+if [ "$MODE" = "imager" ]; then
+    PLIST_NAME="com.andychoi.ai-mlx-imager"
+    EXEC_NAME="ai-mlx-imager"
+    PORT="11435"
+    LOG_NAME="ai-mlx-imager.log"
+    EXTRA_ARGS_XML='        <string>--max-resident-models</string>
+        <string>1</string>
+        <string>--max-resident-gb</string>
+        <string>30</string>'
+else
+    PLIST_NAME="com.andychoi.ai-mlx-server"
+    EXEC_NAME="ai-mlx-server"
+    PORT="11434"
+    LOG_NAME="ai-mlx-server.log"
+    EXTRA_ARGS_XML=""
+fi
+
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs"
 CONFIG_DIR="$HOME/.config/ai-mlx-server"
@@ -21,6 +43,8 @@ models: []
 #     role: chat
 #   - id: mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ
 #     role: embedding
+#   - id: mlx-community/Qwen-Image-2512-4bit
+#     role: image
 EOF
     echo "Created default config: $CONFIG_DIR/models.yaml"
 fi
@@ -37,11 +61,12 @@ cat > "$LAUNCH_AGENTS/$PLIST_NAME.plist" <<EOF
 
     <key>ProgramArguments</key>
     <array>
-        <string>$HOME/.local/bin/ai-mlx-server</string>
+        <string>$HOME/.local/bin/$EXEC_NAME</string>
         <string>--models-config</string>
         <string>$CONFIG_DIR/models.yaml</string>
         <string>--port</string>
-        <string>11434</string>
+        <string>$PORT</string>
+$EXTRA_ARGS_XML
     </array>
 
     <key>RunAtLoad</key>
@@ -51,10 +76,10 @@ cat > "$LAUNCH_AGENTS/$PLIST_NAME.plist" <<EOF
     <true/>
 
     <key>StandardOutPath</key>
-    <string>$LOG_DIR/ai-mlx-server.log</string>
+    <string>$LOG_DIR/$LOG_NAME</string>
 
     <key>StandardErrorPath</key>
-    <string>$LOG_DIR/ai-mlx-server.log</string>
+    <string>$LOG_DIR/$LOG_NAME</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -73,4 +98,4 @@ echo ""
 echo "To stop the service:"
 echo "  launchctl unload $LAUNCH_AGENTS/$PLIST_NAME.plist"
 echo ""
-echo "Logs: $LOG_DIR/ai-mlx-server.log"
+echo "Logs: $LOG_DIR/$LOG_NAME"

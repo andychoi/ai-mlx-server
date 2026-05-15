@@ -249,6 +249,126 @@ python server.py --model mlx-community/gemma-4-27b-it-4bit \
   --adapter-path lora/adapters/my-adapter --port 11434
 ```
 
+## Image Generation Server (`ai-mlx-imager`)
+
+A sibling HTTP server for OpenAI-compatible image generation, backed by
+[mflux](https://github.com/filipstrand/mflux). Default model is
+[Qwen-Image](https://huggingface.co/Qwen/Qwen-Image) (20B MMDiT, Apache 2.0).
+Runs alongside the LLM server on a separate port.
+
+### Install
+
+```bash
+pip install -e ".[image]"
+```
+
+### Run
+
+```bash
+# Default: Qwen-Image at mlx-community/Qwen-Image-2512-4bit on port 11435
+ai-mlx-imager
+
+# Pick another mflux-supported model
+ai-mlx-imager --model black-forest-labs/FLUX.1-schnell --steps 4
+
+# With memory caps suited for a 64GB Mac running both servers
+ai-mlx-imager --max-resident-models 1 --max-resident-gb 30
+```
+
+### Endpoint
+
+`POST /v1/images/generations` (OpenAI-compatible)
+
+```bash
+curl http://localhost:11435/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "a red panda wearing a tiny astronaut helmet, studio lighting",
+    "n": 1,
+    "size": "1024x1024",
+    "response_format": "b64_json"
+  }'
+```
+
+Response shape:
+```json
+{
+  "created": 1747300000,
+  "data": [
+    { "b64_json": "iVBORw0KGgoAAAANSUhEUgAA…", "revised_prompt": null }
+  ]
+}
+```
+
+Only `b64_json` is supported — there is no blob store to serve `url` responses.
+
+### Non-standard request fields
+
+These extend the OpenAI schema with parameters relevant to local diffusion:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `seed` | int | random | For deterministic generation; when `n > 1`, seeds are `seed, seed+1, …`. |
+| `steps` | int | `--steps` (20) | Denoising steps; clamped to `--max-steps`. |
+| `guidance_scale` | float | `--guidance` (4.0) | Classifier-free guidance, range [0, 20]. |
+| `negative_prompt` | str | `""` | What to push the image away from. |
+
+### Size constraints
+
+`size` accepts `WIDTHxHEIGHT` where both dimensions are multiples of 8 in [64, 2048],
+and `W*H ≤ --max-pixels`. The OpenAI presets (`1024x1024`, `1024x1536`, `1536x1024`, etc.)
+all satisfy this rule. `"auto"` falls back to the server's `--width`/`--height` defaults.
+
+### Image editing (`POST /v1/images/edits`)
+
+Conditional image-to-image — supply a source image and a prompt; the edit model rewrites the image to match. Uses [Qwen-Image-Edit-2511](https://huggingface.co/Qwen/Qwen-Image-Edit-2511) by default.
+
+```bash
+curl http://localhost:11435/v1/images/edits \
+  -F "image=@/path/to/source.png" \
+  -F "prompt=Turn the sky into a vivid sunset" \
+  -F "n=1" \
+  -F "response_format=b64_json" \
+  | jq -r '.data[0].b64_json' | base64 -d > out.png
+```
+
+Request is **`multipart/form-data`**. Required fields: `image` (binary file), `prompt` (string). Optional fields mirror `/v1/images/generations`: `model`, `n`, `size`, `seed`, `steps`, `guidance_scale`, `negative_prompt`, `response_format` (must be `b64_json`).
+
+**`size` is optional for edits** — omitting it lets the model use the source image's dimensions. When provided, it follows the same multiples-of-8 rule.
+
+**No MLX-quantized port of Qwen-Image-Edit exists on HuggingFace as of May 2026.** The default `Qwen/Qwen-Image-Edit-2511` is the upstream BF16 (~40-60GB to download), which mflux quantizes on-the-fly via `--quantize`. First load is slow; subsequent generations are fast. Plan disk space accordingly, or point `--edit-model` at a pre-quantized variant when one becomes available.
+
+### Other endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Uptime, resident models, RAM, queue depth |
+| `GET /metrics` | Prometheus metrics (image-gen counters) |
+| `GET /api/version` | Server version |
+| `GET /api/tags` | List locally cached image-capable models |
+
+### macOS launchd service
+
+```bash
+bash packaging/install-service.sh --imager       # installs the image server on port 11435
+launchctl load ~/Library/LaunchAgents/com.andychoi.ai-mlx-imager.plist
+tail -f ~/Library/Logs/ai-mlx-imager.log
+
+bash packaging/uninstall-service.sh --imager     # remove the image service
+```
+
+The LLM server (`ai-mlx-server`) and image server (`ai-mlx-imager`) are
+independent processes — install whichever you need.
+
+### Notes & limits
+
+- **Memory:** Qwen-Image weights at 4-bit are ~24 GB on disk and unpack to roughly the same
+  resident size. Plan for ~30 GB peak. On a 64 GB Mac you can run both servers concurrently.
+- **Concurrency:** generations serialize through a single inference lock (MLX uses one GPU).
+  `/health` and `/metrics` stay responsive during generation thanks to a threaded HTTP server.
+- **Other models:** because mflux's loader is model-generic, FLUX.1-dev/schnell, Z-Image, FIBO,
+  and other mflux-supported families work via `--model <hf-repo>` without extra code.
+
 ## In-Process Use
 
 For direct Python access without the HTTP server (sub-millisecond latency, custom decoding):

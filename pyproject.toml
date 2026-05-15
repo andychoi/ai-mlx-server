@@ -13,12 +13,14 @@ dependencies = [
 vlm = ["mlx-vlm>=0.2"]
 lora = ["datasets", "mlx-lm[lora]"]
 metrics = ["prometheus_client"]
+image = ["mflux>=0.7", "Pillow>=10"]
 dev = ["pytest", "httpx"]
 
 [tool.setuptools]
 packages = []
-py-modules = ["server", "cache", "invoke", "metrics", "mlx_tool"]
+py-modules = ["server", "cache", "invoke", "metrics", "mlx_tool", "imager"]
 
 [project.scripts]
 ai-mlx-server = "server:main"
+ai-mlx-imager = "imager:main"
 mlx-tool = "mlx_tool:main"

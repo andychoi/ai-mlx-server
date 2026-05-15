@@ -266,6 +266,11 @@ class TestStreamTranslatorWfile(unittest.TestCase):
                 pass
 
         translator = _StreamTranslatorWfile(FakeWfile(), "llama3")
+        # Prime the translator with an HTTP header preamble so it advances past
+        # the header-passthrough state and into body-translation mode. Without
+        # this, every byte we write goes straight through unchanged.
+        translator.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n\r\n")
+        buf.clear()
         return translator, buf
 
     def _sse_line(self, content, finish_reason=None):

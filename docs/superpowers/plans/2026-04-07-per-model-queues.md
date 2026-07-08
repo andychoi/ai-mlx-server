@@ -45,7 +45,7 @@ def test_on_evict_callback_fires(self):
 - [ ] **Step 1.2 — Run test to confirm it fails**
 
 ```bash
-cd /Users/andymini/ai/ai-mlx-server
+cd /Users/andymini/ai/mlx-server
 python -m pytest tests/test_cache.py::TestModelCacheLRU::test_on_evict_callback_fires -v
 ```
 

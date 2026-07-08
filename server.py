@@ -714,7 +714,7 @@ class MLXAPIHandler(APIHandler):
 
     def _handle_metrics(self):
         if not _metrics_enabled:
-            self._json_response(503, {"error": "prometheus_client not installed. pip install ai-mlx-server[metrics]"})
+            self._json_response(503, {"error": "prometheus_client not installed. pip install mlx-server[metrics]"})
             return
         from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
         # Update gauges from current cache state
@@ -1208,12 +1208,12 @@ def main():
                         help="Chat model to preload at startup (can be specified multiple times)")
     parser.add_argument("--preload-embedding", action="append", metavar="MODEL",
                         help="Embedding model to preload at startup (can be specified multiple times)")
-    _default_config = os.path.expanduser("~/.config/ai-mlx-server/models.yaml")
+    _default_config = os.path.expanduser("~/.config/mlx-server/models.yaml")
     parser.add_argument("--models-config", type=str,
                         default=_default_config if os.path.exists(_default_config) else None,
                         metavar="PATH",
                         help="Path to YAML config file listing models to preload "
-                             "(default: ~/.config/ai-mlx-server/models.yaml if it exists)")
+                             "(default: ~/.config/mlx-server/models.yaml if it exists)")
     # Phase 2.2: LRU eviction limits
     parser.add_argument("--max-resident-models", type=int, default=None, metavar="N",
                         help="Maximum number of models to keep in memory")

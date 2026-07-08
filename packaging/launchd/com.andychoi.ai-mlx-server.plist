@@ -4,13 +4,13 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.andychoi.ai-mlx-server</string>
+    <string>com.andychoi.mlx-server</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>exec ai-mlx-server --models-config ~/.config/ai-mlx-server/models.yaml --port 11434</string>
+        <string>exec mlx-server --models-config ~/.config/mlx-server/models.yaml --port 11434</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -20,10 +20,10 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>__HOME__/Library/Logs/ai-mlx-server.log</string>
+    <string>__HOME__/Library/Logs/mlx-server.log</string>
 
     <key>StandardErrorPath</key>
-    <string>__HOME__/Library/Logs/ai-mlx-server.log</string>
+    <string>__HOME__/Library/Logs/mlx-server.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

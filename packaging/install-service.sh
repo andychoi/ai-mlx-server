@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install ai-mlx-server (LLM) or ai-mlx-imager (image-gen) as a macOS launchd user agent.
+# Install mlx-server (LLM) or ai-mlx-imager (image-gen) as a macOS launchd user agent.
 # Usage: bash packaging/install-service.sh           # LLM server on port 11434
 #        bash packaging/install-service.sh --imager  # image server on port 11435
 
@@ -20,16 +20,16 @@ if [ "$MODE" = "imager" ]; then
         <string>--max-resident-gb</string>
         <string>30</string>'
 else
-    PLIST_NAME="com.andychoi.ai-mlx-server"
-    EXEC_NAME="ai-mlx-server"
+    PLIST_NAME="com.andychoi.mlx-server"
+    EXEC_NAME="mlx-server"
     PORT="11434"
-    LOG_NAME="ai-mlx-server.log"
+    LOG_NAME="mlx-server.log"
     EXTRA_ARGS_XML=""
 fi
 
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs"
-CONFIG_DIR="$HOME/.config/ai-mlx-server"
+CONFIG_DIR="$HOME/.config/mlx-server"
 
 mkdir -p "$LAUNCH_AGENTS" "$LOG_DIR" "$CONFIG_DIR"
 

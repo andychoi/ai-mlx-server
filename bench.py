@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive benchmark: Qwen3 vs Gemma3 on ai-mlx-server features.
+"""Interactive benchmark: Qwen3 vs Gemma3 on mlx-server features.
 
 Tests baseline accuracy, thinking-control features, and bare-tag resolution
 against a running server, then prints a side-by-side comparison table.
@@ -294,7 +294,7 @@ def main() -> None:
     results: list[Result] = []
 
     print(BOLD(f"\n{'═' * 80}"))
-    print(BOLD("  ai-mlx-server — interactive feature benchmark"))
+    print(BOLD("  mlx-server — interactive feature benchmark"))
     print(BOLD(f"  Server: {args.server}    Models: {', '.join(args.models)}"))
     print(BOLD(f"{'═' * 80}\n"))
 

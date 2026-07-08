@@ -1,4 +1,4 @@
-"""Prometheus metrics for ai-mlx-server."""
+"""Prometheus metrics for mlx-server."""
 
 # All metrics are created at import time so they're registered globally.
 # Import this module only when prometheus_client is available.

@@ -695,7 +695,7 @@ def _build_argparser() -> argparse.ArgumentParser:
                    help="List locally cached HuggingFace models and exit")
     p.add_argument("--preload", action="append", metavar="MODEL",
                    help="Image model to preload at startup (can be repeated)")
-    _default_config = os.path.expanduser("~/.config/ai-mlx-server/models.yaml")
+    _default_config = os.path.expanduser("~/.config/mlx-server/models.yaml")
     p.add_argument("--models-config", type=str,
                    default=_default_config if os.path.exists(_default_config) else None,
                    metavar="PATH",

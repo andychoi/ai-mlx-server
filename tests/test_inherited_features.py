@@ -114,7 +114,7 @@ def test_tool_calling_integration():
 
     Run manually:
         pytest tests/test_inherited_features.py::test_tool_calling_integration --no-header -s
-    Requires: ai-mlx-server running with a tool-capable model.
+    Requires: mlx-server running with a tool-capable model.
     """
     import httpx
     resp = httpx.post(

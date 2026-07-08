@@ -1,7 +1,7 @@
 # Design: Per-model ResponseGenerator workers
 
 **Date:** 2026-04-07  
-**Repo:** `andychoi/ai-mlx-server`  
+**Repo:** `andychoi/mlx-server`  
 **Branch target:** `main`
 
 ---

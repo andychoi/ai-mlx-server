@@ -1,4 +1,4 @@
-# ai-mlx-server
+# mlx-server
 
 MLX inference server for Apple Silicon — OpenAI-compatible API with embeddings and LoRA support.
 
@@ -11,13 +11,13 @@ Any client that speaks the OpenAI/Ollama API can use this server transparently.
 - **Usage token accounting** — `prompt_tokens` and `completion_tokens` in every response
 - **Tool calling** — pass `tools: [...]` in the request body; works with tool-capable models (e.g. Qwen3)
 
-### Added by ai-mlx-server
+### Added by mlx-server
 - **Ollama-compatible API** — `POST /api/generate`, `/api/chat`, `/api/embeddings`, `/api/show`; `GET /api/tags`, `/api/version`, `/api/ps`
 - **Batched embeddings** (`POST /v1/embeddings`) — accepts `input: str | list[str]`
 - **Multi-model warm pool** — `--preload MODEL` (chat), `--preload-embedding MODEL` (embeddings)
 - **LRU model eviction** — `--max-resident-models N`, `--max-resident-gb N`
 - **Rich `/health`** — uptime, resident models, RAM stats, queue depth
-- **Prometheus `/metrics`** — install with `pip install ai-mlx-server[metrics]`
+- **Prometheus `/metrics`** — install with `pip install mlx-server[metrics]`
 - **Thinking control** — disable/enable reasoning via `options.enable_thinking`, `chat_template_kwargs`, or the `/no_think` system-prompt prefix (Qwen3-compatible)
 - **Model aliases** — map Ollama-style short names (`gemma4:e4b`, `qwen3.5:9b`) to HuggingFace repo IDs via `models.yaml`
 - **Bare model tags** — `snowflake-arctic-embed-l-v2.0-4bit` auto-resolves to `mlx-community/snowflake-arctic-embed-l-v2.0-4bit`
@@ -28,28 +28,28 @@ Any client that speaks the OpenAI/Ollama API can use this server transparently.
 
 ### pip (recommended)
 ```bash
-pip install git+https://github.com/andychoi/ai-mlx-server.git
+pip install git+https://github.com/andychoi/mlx-server.git
 ```
 
 ### macOS native service (launchd)
 
-Run `ai-mlx-server` automatically at login, with restart-on-crash:
+Run `mlx-server` automatically at login, with restart-on-crash:
 
 ```bash
 # Install via pip first, then:
 bash packaging/install-service.sh
 
 # Start the service
-launchctl load ~/Library/LaunchAgents/com.andychoi.ai-mlx-server.plist
+launchctl load ~/Library/LaunchAgents/com.andychoi.mlx-server.plist
 
 # Stop the service
-launchctl unload ~/Library/LaunchAgents/com.andychoi.ai-mlx-server.plist
+launchctl unload ~/Library/LaunchAgents/com.andychoi.mlx-server.plist
 
 # View logs
-tail -f ~/Library/Logs/ai-mlx-server.log
+tail -f ~/Library/Logs/mlx-server.log
 ```
 
-Edit `~/.config/ai-mlx-server/models.yaml` to configure which models to preload at startup.
+Edit `~/.config/mlx-server/models.yaml` to configure which models to preload at startup.
 
 ## Quick Start
 
@@ -168,7 +168,7 @@ structured-output consumers like LightRAG. To explicitly enable thinking, pass
 ## Model Aliases
 
 Map Ollama-style short names (including tags like `:e4b`, `:9b`) to full HuggingFace repo IDs
-in `~/.config/ai-mlx-server/models.yaml`:
+in `~/.config/mlx-server/models.yaml`:
 
 ```yaml
 aliases:
@@ -357,7 +357,7 @@ tail -f ~/Library/Logs/ai-mlx-imager.log
 bash packaging/uninstall-service.sh --imager     # remove the image service
 ```
 
-The LLM server (`ai-mlx-server`) and image server (`ai-mlx-imager`) are
+The LLM server (`mlx-server`) and image server (`ai-mlx-imager`) are
 independent processes — install whichever you need.
 
 ### Notes & limits

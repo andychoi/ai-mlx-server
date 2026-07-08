@@ -10,7 +10,7 @@
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>exec ai-mlx-imager --models-config ~/.config/ai-mlx-server/models.yaml --port 11435 --max-resident-models 1 --max-resident-gb 30</string>
+        <string>exec ai-mlx-imager --models-config ~/.config/mlx-server/models.yaml --port 11435 --max-resident-models 1 --max-resident-gb 30</string>
     </array>
 
     <key>RunAtLoad</key>

@@ -2,7 +2,7 @@
 
 MLX inference server for Apple Silicon — OpenAI-compatible API with embeddings and LoRA support.
 
-Extracted from [ai-docs](https://github.com/andychoi/ai-docs) for standalone use. Any client that speaks the OpenAI/Ollama API can use this server transparently.
+Any client that speaks the OpenAI/Ollama API can use this server transparently.
 
 ## Features
 
